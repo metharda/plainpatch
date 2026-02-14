@@ -1,0 +1,482 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/ledger.json",
+  "title": "ledger configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "app": {
+      "const": "ledger",
+      "description": "App name."
+    },
+    "environment": {
+      "type": "string",
+      "enum": [
+        "dev",
+        "staging",
+        "production"
+      ],
+      "description": "Deployment stage."
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "StatefulSet",
+          "description": "Kubernetes workload kind."
+        },
+        "replicas": {
+          "type": "integer",
+          "description": "Number of pods.",
+          "minimum": 0,
+          "maximum": 999,
+          "default": 1
+        },
+        "container": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "type": "string",
+              "description": "Container image, repository:tag.",
+              "pattern": "^[a-z0-9./_-]+(:[A-Za-z0-9._-]+)?$"
+            },
+            "imagePullPolicy": {
+              "type": "string",
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ],
+              "default": "IfNotPresent",
+              "description": "When the kubelet pulls the image."
+            },
+            "port": {
+              "type": "integer",
+              "description": "Port the application listens on.",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Extra command-line arguments."
+            },
+            "resources": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cpu": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "limitMilliCPU": {
+                      "type": "integer",
+                      "description": "CPU limit in millicores (1000 = 1 core).",
+                      "minimum": 50,
+                      "maximum": 64000
+                    },
+                    "requestMilliCPU": {
+                      "type": "integer",
+                      "description": "CPU guaranteed to the container, in millicores.",
+                      "minimum": 50,
+                      "maximum": 64000
+                    }
+                  },
+                  "required": [
+                    "limitMilliCPU",
+                    "requestMilliCPU"
+                  ],
+                  "description": "CPU in millicores."
+                },
+                "memory": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "limitMiB": {
+                      "type": "integer",
+                      "description": "Memory limit in MiB; the container is OOM-killed above it.",
+                      "minimum": 32,
+                      "maximum": 262144
+                    },
+                    "requestMiB": {
+                      "type": "integer",
+                      "description": "Memory guaranteed to the container, in MiB.",
+                      "minimum": 32,
+                      "maximum": 262144
+                    }
+                  },
+                  "required": [
+                    "limitMiB",
+                    "requestMiB"
+                  ],
+                  "description": "Memory in MiB."
+                }
+              },
+              "required": [
+                "cpu",
+                "memory"
+              ],
+              "description": "Compute resources. Limits must not be below requests."
+            },
+            "envs": {
+              "type": "object",
+              "description": "Environment variables (name -> value).",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "propertyNames": {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              }
+            },
+            "probes": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "liveness": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "HTTP path the kubelet requests.",
+                      "pattern": "^/",
+                      "default": "/live"
+                    },
+                    "port": {
+                      "type": "integer",
+                      "description": "Container port the probe connects to.",
+                      "minimum": 1,
+                      "maximum": 65535
+                    },
+                    "initialDelaySeconds": {
+                      "type": "integer",
+                      "description": "Seconds to wait after start before the first probe.",
+                      "minimum": 0,
+                      "maximum": 3600,
+                      "default": 0
+                    },
+                    "periodSeconds": {
+                      "type": "integer",
+                      "description": "Seconds between probes.",
+                      "minimum": 1,
+                      "maximum": 3600,
+                      "default": 10
+                    },
+                    "timeoutSeconds": {
+                      "type": "integer",
+                      "description": "Seconds before a probe attempt times out.",
+                      "minimum": 1,
+                      "maximum": 3600,
+                      "default": 1
+                    },
+                    "successThreshold": {
+                      "type": "integer",
+                      "description": "Consecutive successes needed to pass.",
+                      "minimum": 1,
+                      "maximum": 10,
+                      "default": 1
+                    },
+                    "failureThreshold": {
+                      "type": "integer",
+                      "description": "Consecutive failures before the probe fails.",
+                      "minimum": 1,
+                      "maximum": 30,
+                      "default": 3
+                    }
+                  },
+                  "required": [
+                    "port"
+                  ],
+                  "description": "Restarts the container when it fails."
+                },
+                "readiness": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "HTTP path the kubelet requests.",
+                      "pattern": "^/",
+                      "default": "/ready"
+                    },
+                    "port": {
+                      "type": "integer",
+                      "description": "Container port the probe connects to.",
+                      "minimum": 1,
+                      "maximum": 65535
+                    },
+                    "initialDelaySeconds": {
+                      "type": "integer",
+                      "description": "Seconds to wait after start before the first probe.",
+                      "minimum": 0,
+                      "maximum": 3600,
+                      "default": 0
+                    },
+                    "periodSeconds": {
+                      "type": "integer",
+                      "description": "Seconds between probes.",
+                      "minimum": 1,
+                      "maximum": 3600,
+                      "default": 10
+                    },
+                    "timeoutSeconds": {
+                      "type": "integer",
+                      "description": "Seconds before a probe attempt times out.",
+                      "minimum": 1,
+                      "maximum": 3600,
+                      "default": 1
+                    },
+                    "successThreshold": {
+                      "type": "integer",
+                      "description": "Consecutive successes needed to pass.",
+                      "minimum": 1,
+                      "maximum": 10,
+                      "default": 1
+                    },
+                    "failureThreshold": {
+                      "type": "integer",
+                      "description": "Consecutive failures before the probe fails.",
+                      "minimum": 1,
+                      "maximum": 30,
+                      "default": 3
+                    }
+                  },
+                  "required": [
+                    "port"
+                  ],
+                  "description": "Removes the pod from load balancing while it fails."
+                },
+                "startup": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "HTTP path the kubelet requests.",
+                      "pattern": "^/",
+                      "default": "/start"
+                    },
+                    "port": {
+                      "type": "integer",
+                      "description": "Container port the probe connects to.",
+                      "minimum": 1,
+                      "maximum": 65535
+                    },
+                    "initialDelaySeconds": {
+                      "type": "integer",
+                      "description": "Seconds to wait after start before the first probe.",
+                      "minimum": 0,
+                      "maximum": 3600,
+                      "default": 0
+                    },
+                    "periodSeconds": {
+                      "type": "integer",
+                      "description": "Seconds between probes.",
+                      "minimum": 1,
+                      "maximum": 3600,
+                      "default": 10
+                    },
+                    "timeoutSeconds": {
+                      "type": "integer",
+                      "description": "Seconds before a probe attempt times out.",
+                      "minimum": 1,
+                      "maximum": 3600,
+                      "default": 1
+                    },
+                    "successThreshold": {
+                      "type": "integer",
+                      "description": "Consecutive successes needed to pass.",
+                      "minimum": 1,
+                      "maximum": 10,
+                      "default": 1
+                    },
+                    "failureThreshold": {
+                      "type": "integer",
+                      "description": "Consecutive failures before the probe fails.",
+                      "minimum": 1,
+                      "maximum": 30,
+                      "default": 3
+                    }
+                  },
+                  "required": [
+                    "port"
+                  ],
+                  "description": "Holds back the other probes until the app has started."
+                }
+              },
+              "required": [
+                "liveness",
+                "readiness",
+                "startup"
+              ],
+              "description": "Health probes."
+            },
+            "securityContext": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "runAsNonRoot": {
+                  "type": "boolean",
+                  "description": "Refuse to start as root.",
+                  "default": true
+                },
+                "readOnlyRootFilesystem": {
+                  "type": "boolean",
+                  "description": "Mount the root filesystem read-only.",
+                  "default": true
+                },
+                "runAsUser": {
+                  "type": "integer",
+                  "description": "UID to run as.",
+                  "minimum": 1,
+                  "maximum": 65535
+                }
+              },
+              "description": "Process security settings."
+            }
+          },
+          "required": [
+            "image",
+            "resources",
+            "envs",
+            "probes"
+          ],
+          "description": "The application container."
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "description": "Seconds a pod gets to shut down before it is killed.",
+          "minimum": 0,
+          "maximum": 3600,
+          "default": 30
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Node labels the pods must match."
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Extra pod labels."
+        },
+        "autoscaling": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Scale replicas with CPU usage.",
+              "default": false
+            },
+            "minReplicas": {
+              "type": "integer",
+              "description": "Lower bound when autoscaling.",
+              "minimum": 1,
+              "maximum": 999
+            },
+            "maxReplicas": {
+              "type": "integer",
+              "description": "Upper bound when autoscaling.",
+              "minimum": 1,
+              "maximum": 999
+            },
+            "targetCPUPercent": {
+              "type": "integer",
+              "description": "Average CPU utilization to aim for.",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "description": "Horizontal pod autoscaler."
+        },
+        "podManagementPolicy": {
+          "type": "string",
+          "enum": [
+            "OrderedReady",
+            "Parallel"
+          ],
+          "default": "OrderedReady",
+          "description": "How pods are started and stopped."
+        },
+        "storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "class": {
+              "type": "string",
+              "description": "StorageClass for the per-pod volume."
+            },
+            "accessMode": {
+              "type": "string",
+              "enum": [
+                "ReadWriteOnce",
+                "ReadWriteOncePod",
+                "ReadWriteMany"
+              ],
+              "description": "Volume access mode."
+            }
+          },
+          "required": [
+            "class",
+            "accessMode"
+          ],
+          "description": "Per-pod persistent volume."
+        }
+      },
+      "required": [
+        "kind",
+        "replicas",
+        "container"
+      ],
+      "description": "How the app runs (StatefulSet)."
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "type": "integer",
+          "description": "Port the Service exposes inside the cluster.",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "targetPort": {
+          "type": "integer",
+          "description": "Container port traffic is forwarded to.",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "protocol": {
+          "type": "string",
+          "enum": [
+            "TCP",
+            "UDP"
+          ],
+          "default": "TCP",
+          "description": "Transport protocol."
+        }
+      },
+      "required": [
+        "port",
+        "targetPort"
+      ],
+      "description": "Cluster-internal Service."
+    }
+  },
+  "required": [
+    "app",
+    "environment",
+    "workload",
+    "service"
+  ],
+  "description": "Stateful ledger service with per-pod storage."
+}

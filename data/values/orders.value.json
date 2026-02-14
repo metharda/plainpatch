@@ -1,0 +1,81 @@
+{
+  "app": "orders",
+  "environment": "staging",
+  "workload": {
+    "kind": "Deployment",
+    "replicas": 2,
+    "strategy": {
+      "maxSurge": "25%",
+      "maxUnavailable": "25%"
+    },
+    "terminationGracePeriodSeconds": 30,
+    "container": {
+      "image": "orders:1.2.3",
+      "imagePullPolicy": "IfNotPresent",
+      "port": 8888,
+      "resources": {
+        "cpu": {
+          "limitMilliCPU": 500,
+          "requestMilliCPU": 100
+        },
+        "memory": {
+          "limitMiB": 1024,
+          "requestMiB": 512
+        }
+      },
+      "envs": {
+        "TENANT": "acme"
+      },
+      "probes": {
+        "liveness": {
+          "path": "/live",
+          "port": 8888,
+          "initialDelaySeconds": 0,
+          "periodSeconds": 10,
+          "timeoutSeconds": 1,
+          "successThreshold": 1,
+          "failureThreshold": 3
+        },
+        "readiness": {
+          "path": "/ready",
+          "port": 8888,
+          "initialDelaySeconds": 0,
+          "periodSeconds": 10,
+          "timeoutSeconds": 1,
+          "successThreshold": 1,
+          "failureThreshold": 3
+        },
+        "startup": {
+          "path": "/start",
+          "port": 8888,
+          "initialDelaySeconds": 0,
+          "periodSeconds": 10,
+          "timeoutSeconds": 1,
+          "successThreshold": 1,
+          "failureThreshold": 3
+        }
+      },
+      "securityContext": {
+        "runAsNonRoot": true,
+        "readOnlyRootFilesystem": true
+      }
+    }
+  },
+  "service": {
+    "port": 11888,
+    "targetPort": 8888,
+    "protocol": "TCP"
+  },
+  "ingress": {
+    "hostname": "orders-dev.example.com",
+    "stickySessions": false,
+    "proxy": {
+      "bodySize": 1,
+      "timeouts": {
+        "connectSeconds": 60,
+        "sendSeconds": 60,
+        "readSeconds": 60
+      }
+    }
+  }
+}

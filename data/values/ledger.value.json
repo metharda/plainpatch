@@ -1,0 +1,68 @@
+{
+  "app": "ledger",
+  "environment": "staging",
+  "workload": {
+    "kind": "StatefulSet",
+    "replicas": 2,
+    "podManagementPolicy": "OrderedReady",
+    "terminationGracePeriodSeconds": 30,
+    "storage": {
+      "class": "standard",
+      "accessMode": "ReadWriteOnce"
+    },
+    "container": {
+      "image": "ledger:3.2.2",
+      "imagePullPolicy": "IfNotPresent",
+      "port": 4444,
+      "resources": {
+        "cpu": {
+          "limitMilliCPU": 2500,
+          "requestMilliCPU": 2000
+        },
+        "memory": {
+          "limitMiB": 4096,
+          "requestMiB": 4096
+        }
+      },
+      "envs": {},
+      "probes": {
+        "liveness": {
+          "path": "/live",
+          "port": 4444,
+          "initialDelaySeconds": 0,
+          "periodSeconds": 10,
+          "timeoutSeconds": 1,
+          "successThreshold": 1,
+          "failureThreshold": 3
+        },
+        "readiness": {
+          "path": "/ready",
+          "port": 4444,
+          "initialDelaySeconds": 0,
+          "periodSeconds": 10,
+          "timeoutSeconds": 1,
+          "successThreshold": 1,
+          "failureThreshold": 3
+        },
+        "startup": {
+          "path": "/start",
+          "port": 4444,
+          "initialDelaySeconds": 0,
+          "periodSeconds": 10,
+          "timeoutSeconds": 1,
+          "successThreshold": 1,
+          "failureThreshold": 3
+        }
+      },
+      "securityContext": {
+        "runAsNonRoot": true,
+        "readOnlyRootFilesystem": true
+      }
+    }
+  },
+  "service": {
+    "port": 4444,
+    "targetPort": 4444,
+    "protocol": "TCP"
+  }
+}

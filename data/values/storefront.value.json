@@ -1,0 +1,63 @@
+{
+  "app": "storefront",
+  "environment": "staging",
+  "workload": {
+    "kind": "Deployment",
+    "replicas": 2,
+    "maxConnections": 10,
+    "strategy": {
+      "maxSurge": "25%",
+      "maxUnavailable": "25%"
+    },
+    "terminationGracePeriodSeconds": 30,
+    "container": {
+      "image": "storefront:1.0.0",
+      "imagePullPolicy": "IfNotPresent",
+      "port": 6666,
+      "resources": {
+        "cpu": {
+          "limitMilliCPU": 1500,
+          "requestMilliCPU": 1000
+        },
+        "memory": {
+          "limitMiB": 2048,
+          "requestMiB": 512
+        }
+      },
+      "envs": {},
+      "probes": {
+        "liveness": {
+          "path": "/live",
+          "port": 6666,
+          "initialDelaySeconds": 0,
+          "periodSeconds": 10,
+          "timeoutSeconds": 1,
+          "successThreshold": 1,
+          "failureThreshold": 3
+        },
+        "readiness": {
+          "path": "/ready",
+          "port": 6666,
+          "initialDelaySeconds": 0,
+          "periodSeconds": 10,
+          "timeoutSeconds": 1,
+          "successThreshold": 1,
+          "failureThreshold": 3
+        },
+        "startup": {
+          "path": "/start",
+          "port": 6666,
+          "initialDelaySeconds": 0,
+          "periodSeconds": 10,
+          "timeoutSeconds": 1,
+          "successThreshold": 1,
+          "failureThreshold": 3
+        }
+      },
+      "securityContext": {
+        "runAsNonRoot": true,
+        "readOnlyRootFilesystem": true
+      }
+    }
+  }
+}
