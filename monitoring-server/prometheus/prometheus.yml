@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "schema-server"
+    static_configs:
+      - targets: ["schema-server:7001"]
+    metrics_path: /metrics
+
+  - job_name: "values-server"
+    static_configs:
+      - targets: ["values-server:7002"]
+    metrics_path: /metrics
+
+  - job_name: "bot-server"
+    static_configs:
+      - targets: ["bot-server:7000"]
+    metrics_path: /metrics
