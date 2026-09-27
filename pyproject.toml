@@ -3,6 +3,8 @@ name = "ai-config-tool"
 version = "1.0.0"
 description = "AI-Assisted Application Configuration Tool"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "Ahmet Arda ORAK" }]
 
 [tool.ruff]
 target-version = "py312"
