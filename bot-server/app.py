@@ -8,10 +8,13 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from urllib.parse import urlencode, urlsplit
 
 import httpx
+import jsonpatch
+import jsonpointer
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from jsonschema import ValidationError, validate
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -92,6 +95,8 @@ circuit_breaker = CircuitBreaker()
 
 class EditRequest(BaseModel):
     text: str
+    apply: bool = False
+    author: str = "anonymous"
 
 
 @asynccontextmanager
@@ -148,26 +153,92 @@ async def call_llm(system: str, user: str) -> str:
     raise HTTPException(502, f"LLM unavailable after {config.max_retries} attempts")
 
 
-async def fetch_json(url: str) -> dict:
+async def fetch_json(url: str, method: str = "GET", payload: dict | None = None) -> dict:
+    path = urlsplit(url).path  # never echo internal hostnames back to the caller
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            resp = await client.get(url)
-            if resp.status_code == 404:
-                raise HTTPException(404, f"Not found: {url}")
-            resp.raise_for_status()
-            return resp.json()
+            resp = await client.request(method, url, json=payload)
         except httpx.RequestError as exc:
-            raise HTTPException(503, f"Service unavailable: {url}") from exc
+            raise HTTPException(503, f"Service unavailable: {path}") from exc
+
+    if resp.status_code == 404:
+        raise HTTPException(404, f"Not found: {path}")
+    if resp.status_code >= 400:
+        try:
+            body = resp.json()
+            detail = body.get("detail") if isinstance(body, dict) else None
+        except ValueError:
+            detail = None
+        # client errors (409 nothing to undo, 422) pass through; upstream crashes become 502
+        status = resp.status_code if resp.status_code < 500 else 502
+        raise HTTPException(status, detail or f"Upstream error {resp.status_code}: {path}")
+    return resp.json()
 
 
 def extract_json(text: str) -> str:
     match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
     if match:
         return match.group(1)
-    match = re.search(r"\{[\s\S]*\}", text)
-    if match:
-        return match.group(0)
-    return text
+    # find every top-level span that parses as JSON and keep the longest,
+    # so prose like "see [1]" around the real answer doesn't win
+    decoder = json.JSONDecoder()
+    best, pos = "", 0
+    for m in re.finditer(r"[\[{]", text):
+        if m.start() < pos:
+            continue
+        try:
+            _, end = decoder.raw_decode(text, m.start())
+        except ValueError:
+            continue
+        if end - m.start() > len(best):
+            best = text[m.start():end]
+        pos = end
+    return best or text
+
+
+def reject_constant(name: str):
+    # Python's json accepts NaN/Infinity, which then can't be serialised in the response
+    raise ValueError(f"{name} is not valid JSON")
+
+
+PATCH_OPS = {"add", "remove", "replace", "move", "copy", "test"}
+
+
+def check_op(op) -> dict:
+    if not (isinstance(op, dict) and op.get("op") in PATCH_OPS and isinstance(op.get("path"), str)):
+        raise jsonpatch.InvalidJsonPatch(f"Invalid patch operation: {op!r}")
+    if op["op"] in ("move", "copy") and not isinstance(op.get("from"), str):
+        raise jsonpatch.InvalidJsonPatch(f"'{op['op']}' needs a string 'from': {op!r}")
+    return op
+
+
+def to_patch(parsed, values: dict) -> list[dict]:
+    if isinstance(parsed, dict) and "op" in parsed:
+        return [check_op(parsed)]
+    # small models sometimes ignore the instructions and return the whole config; diff it back into a patch
+    if isinstance(parsed, dict):
+        return jsonpatch.make_patch(values, parsed).patch
+    if isinstance(parsed, list):
+        return [check_op(op) for op in parsed]
+    raise jsonpatch.InvalidJsonPatch("Expected a list of patch operations")
+
+
+def describe(patch: list[dict], values: dict) -> list[dict]:
+    return [
+        {
+            "op": op["op"],
+            "path": op["path"],
+            # "/-" means "append to array"; there is no old value (resolve_pointer would return a sentinel)
+            "old": None if op["path"].endswith("/-") else jsonpointer.resolve_pointer(values, op["path"], None),
+            "new": jsonpointer.resolve_pointer(values, op["from"], None) if "from" in op else op.get("value"),
+        }
+        for op in patch
+    ]
+
+
+def require_known_app(app_name: str):
+    if app_name not in APPS:
+        raise HTTPException(404, f"Unknown app: {app_name}. Available: {', '.join(APPS)}")
 
 
 @app.get("/health")
@@ -220,17 +291,50 @@ async def process_message(req: EditRequest):
         response = await call_llm(MODIFY_CONFIG_SYSTEM, prompt)
 
         try:
-            json_str = extract_json(response)
-            result = json.loads(json_str)
+            patch = to_patch(json.loads(extract_json(response), parse_constant=reject_constant), values)
+            result = jsonpatch.apply_patch(values, patch)
             validate(instance=result, schema=schema)
-            log.info("Request successful", extra={"request_id": request_id, "app": app_name})
-            return result
-        except json.JSONDecodeError as e:
+            break
+        except ValueError as e:  # includes json.JSONDecodeError
             log.warning("JSON parse error", extra={"error": str(e), "attempt": attempt + 1})
+        except (jsonpatch.JsonPatchException, jsonpointer.JsonPointerException) as e:
+            log.warning("Invalid patch", extra={"error": str(e), "attempt": attempt + 1})
         except ValidationError as e:
             log.warning("Schema validation error", extra={"error": e.message, "attempt": attempt + 1})
+    else:
+        raise HTTPException(500, "Failed to generate valid configuration")
 
-    raise HTTPException(500, "Failed to generate valid configuration")
+    response = {
+        "app": app_name,
+        "applied": False,
+        "revision": None,
+        "changes": describe(patch, values),
+        "patch": patch,
+        "config": result,
+    }
+
+    if req.apply and patch:
+        # ponytail: last write wins if two requests edit the same app at once; add an If-Match revision check if that matters
+        entry = await fetch_json(
+            f"{config.values_url}/{app_name}", "PUT",
+            {"values": result, "author": req.author, "message": user_input},
+        )
+        response.update(applied=True, revision=entry["id"])
+
+    log.info("Request successful", extra={"request_id": request_id, "app": app_name, "applied": response["applied"]})
+    return response
+
+
+@app.get("/history/{app_name}")
+async def history(app_name: str, limit: int = Query(20, ge=1, le=500)):
+    require_known_app(app_name)
+    return await fetch_json(f"{config.values_url}/{app_name}/history?{urlencode({'limit': limit})}")
+
+
+@app.post("/undo/{app_name}")
+async def undo(app_name: str, author: str = "anonymous"):
+    require_known_app(app_name)
+    return await fetch_json(f"{config.values_url}/{app_name}/undo?{urlencode({'author': author})}", "POST")
 
 
 @app.exception_handler(Exception)

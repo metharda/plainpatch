@@ -5,12 +5,22 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
+import respx
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app import CircuitBreaker, app, circuit_breaker, config, exponential_backoff, extract_json
+from app import (
+    CircuitBreaker,
+    app,
+    circuit_breaker,
+    config,
+    describe,
+    exponential_backoff,
+    extract_json,
+)
 
 
 @pytest.fixture
@@ -54,6 +64,9 @@ SAMPLE_VALUES = {
         }
     },
 }
+
+MEMORY_PATH = "/workload/container/resources/memory/limitMiB"
+MEMORY_PATCH = [{"op": "replace", "path": MEMORY_PATH, "value": 1024}]
 
 SAMPLE_MODIFIED_VALUES = {
     "app": "ledger",
@@ -200,10 +213,12 @@ class TestProcessMessageWithMock:
         # Act
         resp = client.post("/edits", json={"text": "set ledger memory to 1024mb"})
 
-        # Assert
+        # Assert — a full config from the LLM is diffed back into a patch
         assert resp.status_code == 200
         data = resp.json()
-        assert data["app"] == "ledger"
+        assert data["config"] == SAMPLE_MODIFIED_VALUES
+        assert data["applied"] is False
+        assert data["changes"] == [{"op": "replace", "path": MEMORY_PATH, "old": 2048, "new": 1024}]
 
     @patch("app.fetch_json")
     @patch("app.call_llm")
@@ -300,3 +315,162 @@ class TestPromptInjection:
 
         # Assert — should not crash, return 4xx/5xx
         assert resp.status_code in [400, 500, 502, 503]
+
+
+class TestJsonPatchEdits:
+    """The LLM answers with RFC 6902 patch ops; the bot applies, validates and optionally persists them."""
+
+    def _llm(self, *responses):
+        replies = iter(responses)
+
+        async def _side_effect(system, user):
+            return next(replies)
+
+        return _side_effect
+
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_patch_is_applied_and_described(self, mock_llm, mock_fetch, client):
+        mock_llm.side_effect = self._llm("ledger", json.dumps(MEMORY_PATCH))
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
+
+        data = client.post("/edits", json={"text": "set ledger memory to 1024mb"}).json()
+
+        assert data["app"] == "ledger"
+        assert data["patch"] == MEMORY_PATCH
+        assert data["config"] == SAMPLE_MODIFIED_VALUES
+        assert data["changes"][0]["old"] == 2048
+        assert mock_fetch.call_count == 2  # preview only, nothing written
+
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_single_op_object_is_accepted(self, mock_llm, mock_fetch, client):
+        mock_llm.side_effect = self._llm("ledger", json.dumps(MEMORY_PATCH[0]))
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
+
+        resp = client.post("/edits", json={"text": "set ledger memory to 1024mb"})
+
+        assert resp.json()["config"] == SAMPLE_MODIFIED_VALUES
+
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_patch_to_missing_path_is_retried(self, mock_llm, mock_fetch, client):
+        bad = [{"op": "replace", "path": "/does/not/exist", "value": 1}]
+        mock_llm.side_effect = self._llm("ledger", json.dumps(bad), '["not an op"]', json.dumps(MEMORY_PATCH))
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
+
+        resp = client.post("/edits", json={"text": "set ledger memory to 1024mb"})
+
+        assert resp.status_code == 200
+        assert resp.json()["patch"] == MEMORY_PATCH
+
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_apply_persists_to_values_service(self, mock_llm, mock_fetch, client):
+        mock_llm.side_effect = self._llm("ledger", json.dumps(MEMORY_PATCH))
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES, {"id": 7}]
+
+        data = client.post("/edits", json={
+            "text": "set ledger memory to 1024mb", "apply": True, "author": "arda",
+        }).json()
+
+        assert data["applied"] is True
+        assert data["revision"] == 7
+        url, method, payload = mock_fetch.call_args.args
+        assert url.endswith("/ledger") and method == "PUT"
+        assert payload == {"values": SAMPLE_MODIFIED_VALUES, "author": "arda", "message": "set ledger memory to 1024mb"}
+
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_apply_with_no_changes_writes_nothing(self, mock_llm, mock_fetch, client):
+        mock_llm.side_effect = self._llm("ledger", "[]")
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
+
+        data = client.post("/edits", json={"text": "set ledger memory to 2048mb", "apply": True}).json()
+
+        assert data["applied"] is False
+        assert mock_fetch.call_count == 2
+
+    def test_describe_handles_append_to_array(self):
+        changes = describe([{"op": "add", "path": "/items/-", "value": 3}], {"items": [1, 2]})
+        assert changes == [{"op": "add", "path": "/items/-", "old": None, "new": 3}]
+
+
+class TestHistoryAndUndo:
+    @pytest.mark.parametrize("method, path", [("get", "/history/printer"), ("post", "/undo/printer")])
+    def test_unknown_app_rejected(self, client, method, path):
+        assert getattr(client, method)(path).status_code == 404
+
+    @patch("app.fetch_json")
+    def test_history_proxied(self, mock_fetch, client):
+        mock_fetch.return_value = [{"id": 1}]
+        assert client.get("/history/storefront?limit=5").json() == [{"id": 1}]
+        assert mock_fetch.call_args.args[0].endswith("/storefront/history?limit=5")
+
+    @patch("app.fetch_json")
+    def test_undo_proxied(self, mock_fetch, client):
+        mock_fetch.return_value = {"id": 2, "reverts": 1}
+        assert client.post("/undo/storefront?author=arda").json()["reverts"] == 1
+        assert mock_fetch.call_args.args == (f"{config.values_url}/storefront/undo?author=arda", "POST")
+
+
+class TestReviewRegressions:
+    def _llm(self, *responses):
+        replies = iter(responses)
+
+        async def _side_effect(system, user):
+            return next(replies)
+
+        return _side_effect
+
+    def test_extract_json_ignores_bracketed_prose(self):
+        patch_text = '[{"op": "replace", "path": "/a", "value": 1}]'
+        assert extract_json(f"Here [1] is it:\n{patch_text}\nThanks [bye]") == patch_text
+
+    def test_describe_move_and_copy_report_moved_value(self):
+        values = {"items": ["a", "b"]}
+        changes = describe([{"op": "copy", "from": "/items/0", "path": "/items/1"}], values)
+        assert changes[0]["old"] == "b"
+        assert changes[0]["new"] == "a"
+
+    @pytest.mark.parametrize("bad_reply", [
+        '[{"op": "copy", "path": "/x", "from": 3}]',  # non-string "from" used to raise TypeError
+        '[{"op": "replace", "path": "/app", "value": NaN}]',  # unserialisable in the response
+        '[{"op": "explode", "path": "/x"}]',
+    ])
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_bad_ops_are_retried_not_crashed(self, mock_llm, mock_fetch, client, bad_reply):
+        mock_llm.side_effect = self._llm("ledger", bad_reply, json.dumps(MEMORY_PATCH))
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
+
+        resp = client.post("/edits", json={"text": "set ledger memory to 1024mb"})
+
+        assert resp.status_code == 200
+        assert resp.json()["patch"] == MEMORY_PATCH
+
+    @pytest.mark.parametrize("upstream_status, body, expected_status, expected_detail", [
+        (409, {"detail": "Nothing to undo for storefront"}, 409, "Nothing to undo for storefront"),
+        (409, "plain text", 409, "Upstream error 409: /storefront/undo"),
+        (503, {"detail": "down"}, 502, "down"),
+        (500, "boom", 502, "Upstream error 500: /storefront/undo"),
+    ])
+    @respx.mock
+    def test_upstream_errors_are_mapped(self, client, upstream_status, body, expected_status, expected_detail):
+        kwargs = {"json": body} if isinstance(body, dict) else {"text": body}
+        respx.post(f"{config.values_url}/storefront/undo").mock(return_value=httpx.Response(upstream_status, **kwargs))
+
+        resp = client.post("/undo/storefront")
+
+        assert resp.status_code == expected_status
+        assert resp.json()["detail"] == expected_detail
+
+    @respx.mock
+    def test_unreachable_service_does_not_leak_hostname(self, client):
+        respx.get(url__startswith=config.values_url).mock(side_effect=httpx.ConnectError("refused"))
+
+        resp = client.get("/history/storefront")
+
+        assert resp.status_code == 503
+        assert "values-server" not in resp.json()["detail"]
+        assert config.values_url not in resp.json()["detail"]
