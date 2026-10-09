@@ -30,11 +30,14 @@ jobs:
       - name: Lint bot-server
         run: ruff check bot-server/
 
+      - name: Lint cli
+        run: ruff check cli/
+
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [schema-server, values-server, bot-server]
+        service: [schema-server, values-server, bot-server, cli]
     steps:
       - uses: actions/checkout@v4
 

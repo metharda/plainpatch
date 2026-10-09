@@ -83,6 +83,9 @@ test:
 	@echo "Running bot-server tests..."
 	@cd bot-server && python3 -m pytest tests/ -v
 	@echo ""
+	@echo "Running cli tests..."
+	@cd cli && python3 -m pytest tests/ -v
+	@echo ""
 	@echo "All tests passed!"
 
 test-coverage:
@@ -92,6 +95,8 @@ test-coverage:
 	@cd values-server && python3 -m pytest tests/ -v --cov=. --cov-report=term-missing --junitxml=test-results.xml
 	@echo ""
 	@cd bot-server && python3 -m pytest tests/ -v --cov=. --cov-report=term-missing --junitxml=test-results.xml
+	@echo ""
+	@cd cli && python3 -m pytest tests/ -v --cov=. --cov-report=term-missing --junitxml=test-results.xml
 
 test-integration:
 	@bash test_integration.sh
@@ -108,6 +113,9 @@ lint:
 	@echo ""
 	@echo "Linting bot-server..."
 	@ruff check bot-server/
+	@echo ""
+	@echo "Linting cli..."
+	@ruff check cli/
 	@echo ""
 	@echo "All lint checks passed!"
 

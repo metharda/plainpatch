@@ -72,7 +72,7 @@ services:
     ports:
       - "${VALUES_PORT:-7002}:7002"
     volumes:
-      - ./data/values:/data/values:ro
+      - ./data/values:/data/values
     deploy:
       resources:
         limits:
