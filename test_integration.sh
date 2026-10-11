@@ -61,22 +61,34 @@ log "Testing Bot Service - Example 1: Ledger memory..."
 RESULT=$(curl -sf -X POST http://localhost:7000/edits \
     -H "Content-Type: application/json" \
     -d '{"text": "set ledger service memory to 1024mb"}')
-echo "$RESULT" | jq -e '.workload' > /dev/null || fail "Bot Service example 1 failed"
+echo "$RESULT" | jq -e '.config.workload and (.changes | length > 0)' > /dev/null || fail "Bot Service example 1 failed"
 log "Example 1: OK"
 
 log "Testing Bot Service - Example 2: Orders env..."
 RESULT=$(curl -sf -X POST http://localhost:7000/edits \
     -H "Content-Type: application/json" \
     -d '{"text": "set TENANT env to globex for orders service"}')
-echo "$RESULT" | jq -e '.workload' > /dev/null || fail "Bot Service example 2 failed"
+echo "$RESULT" | jq -e '.config.workload and (.changes | length > 0)' > /dev/null || fail "Bot Service example 2 failed"
 log "Example 2: OK"
 
 log "Testing Bot Service - Example 3: Storefront CPU..."
 RESULT=$(curl -sf -X POST http://localhost:7000/edits \
     -H "Content-Type: application/json" \
     -d '{"text": "lower cpu limit of storefront service to 80%"}')
-echo "$RESULT" | jq -e '.workload' > /dev/null || fail "Bot Service example 3 failed"
+echo "$RESULT" | jq -e '.config.workload and (.changes | length > 0)' > /dev/null || fail "Bot Service example 3 failed"
 log "Example 3: OK"
+
+log "Testing apply, history and undo..."
+BEFORE=$(curl -sf http://localhost:7002/storefront | jq -S .)
+RESULT=$(curl -sf -X POST http://localhost:7000/edits \
+    -H "Content-Type: application/json" \
+    -d '{"text": "set storefront service memory to 3072mb", "apply": true, "author": "integration-test"}')
+echo "$RESULT" | jq -e '.applied == true and .revision != null' > /dev/null || fail "Apply failed"
+[ "$(curl -sf http://localhost:7002/storefront | jq -S .)" != "$BEFORE" ] || fail "Apply did not change the stored config"
+curl -sf http://localhost:7000/history/storefront | jq -e '.[0].author == "integration-test"' > /dev/null || fail "History missing applied change"
+curl -sf -X POST "http://localhost:7000/undo/storefront?author=integration-test" | jq -e '.reverts != null' > /dev/null || fail "Undo failed"
+[ "$(curl -sf http://localhost:7002/storefront | jq -S .)" = "$BEFORE" ] || fail "Undo did not restore the original config"
+log "Apply / history / undo: OK"
 
 log "Testing edge cases..."
 
