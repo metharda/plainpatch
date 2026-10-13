@@ -40,7 +40,7 @@ System: Returns updated JSON configuration validated against schema
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │ Stage 2: Modify config via LLM                             │  │
 │  │   Input: user message + schema + current values            │  │
-│  │   Output: modified JSON (validated against schema)         │  │
+│  │   Output: JSON Patch ops → applied + schema-validated      │  │
 │  └────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────┘
                                 │
@@ -90,7 +90,14 @@ Stage 1: App Identification
 Stage 2: Configuration Modification
 - Full context with schema and values
 - Focused on specific application
-- Schema validation before returning
+- LLM answers with a **JSON Patch** (RFC 6902), not the whole config
+- Patch is applied, then schema-validated before returning
+
+**Why JSON Patch instead of the full config?**
+- The values files are large; asking a 3B model to re-emit all of it is slow and it silently drops or reorders fields
+- A patch is a few lines: faster to generate, and nothing outside the patch can change by accident
+- The patch doubles as a human-readable diff (`changes` in the response) and as the audit-log entry
+- If the model ignores instructions and returns the whole config anyway, the bot diffs it back into a patch
 
 **Benefits:**
 - Reduced token usage per request
@@ -166,12 +173,18 @@ Bot Service ──HTTP POST──> Ollama (/api/chat)
      - Original user message
      - JSON Schema (structure rules)
      - Current values (to modify)
-   - LLM returns modified JSON
+   - LLM returns JSON Patch ops
 
 5. **Validation**
-   - Bot validates LLM output against schema
-   - If invalid, retry up to 3 times
-   - If valid, return to user
+   - Bot applies the patch and validates the result against the schema
+   - If the patch is malformed or the result is invalid, retry up to 3 times
+   - If valid, return `{app, changes, patch, config}` to the user
+
+6. **Apply (optional, `"apply": true`)**
+   - Bot sends the validated config to `PUT values-server:7002/ledger`
+   - Values service appends an audit entry (author, message, patch, previous snapshot) to `data/values/.history/<app>.jsonl`
+   - Then atomically replaces the values file (write temp file → rename)
+   - `POST /undo/<app>` restores the snapshot of the latest change that hasn't been undone, and logs that as a new entry
 
 6. **Response**
    ```json
@@ -203,7 +216,8 @@ Bot Service ──HTTP POST──> Ollama (/api/chat)
 |----------|-----|-----|
 | Two-stage prompting | Better accuracy | Added latency |
 | Smaller model (3b) | Lower resource usage | Less accuracy |
-| No persistence | Simpler architecture | Changes not saved |
+| Preview by default, opt-in apply | Nothing changes by accident | Extra flag to save |
+| JSONL audit log with snapshots | Simple, greppable, undo is trivial | Grows with every change; no compaction |
 | Sync validation | Guaranteed correctness | Blocks response |
 | Compose profiles | Optional monitoring/gateway | Slightly more complex config |
 
@@ -211,8 +225,8 @@ Bot Service ──HTTP POST──> Ollama (/api/chat)
 
 1. **App names are known**: System only handles storefront, ledger, orders
 2. **Schema is correct**: Provided schemas accurately describe valid configs
-3. **Single user**: No concurrent request handling optimization
-4. **Read-only operation**: System returns modified JSON but doesn't persist
+3. **Single writer**: Concurrent applies to the same app are last-write-wins (no revision check)
+4. **All writes go through the API**: Hand edits to values files are not tracked and can be overwritten by an undo
 
 ---
 
@@ -304,6 +318,7 @@ curl http://localhost:7000/health
 |------|---------|------------|
 | 400 | Invalid input (empty) | Provide valid input |
 | 404 | App not found | Use: storefront, ledger, orders |
+| 409 | Nothing to undo | Every change for this app is already reverted |
 | 500 | Server/validation error | Check logs, retry |
 | 502 | LLM unavailable | Wait for Ollama, check model |
 | 503 | Circuit breaker open | Wait 30s for reset |
@@ -392,6 +407,8 @@ ai-config-tool/
 ├── pyproject.toml                # Ruff + pytest configuration
 ├── README.md                     # Project overview
 ├── ARCHITECTURE.md               # This documentation
+├── LICENSE                       # Apache License 2.0
+├── NOTICE                        # Attribution notice
 ├── test_integration.sh           # Integration test script
 │
 ├── .github/
@@ -406,7 +423,7 @@ ai-config-tool/
 │   ├── requirements.txt
 │   ├── pytest.ini
 │   └── tests/
-│       └── test_app.py           # 25 unit tests
+│       └── test_app.py           # 35 unit tests
 │
 ├── schema-server/                # Schema service (port 7001)
 │   ├── app.py                    # FastAPI app serving JSON schemas
@@ -424,7 +441,12 @@ ai-config-tool/
 │   ├── requirements.txt
 │   ├── pytest.ini
 │   └── tests/
-│       └── test_app.py           # 7 unit tests
+│       └── test_app.py           # 14 unit tests
+│
+├── cli/                          # Terminal client (stdlib only)
+│   ├── configbot.py              # preview / --apply / history / undo
+│   └── tests/
+│       └── test_configbot.py     # 8 unit tests
 │
 ├── data/
 │   ├── schemas/                  # JSON Schema definitions
