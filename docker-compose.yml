@@ -46,7 +46,7 @@ services:
       dockerfile: Dockerfile
     container_name: schema-server
     ports:
-      - "${SCHEMA_PORT:-7001}:7001"
+      - "127.0.0.1:${SCHEMA_PORT:-7001}:7001"
     volumes:
       - ./data/schemas:/data/schemas:ro
     deploy:
@@ -70,7 +70,10 @@ services:
       dockerfile: Dockerfile
     container_name: values-server
     ports:
-      - "${VALUES_PORT:-7002}:7002"
+      # localhost only: PUT here skips the bot's schema validation
+      - "127.0.0.1:${VALUES_PORT:-7002}:7002"
+    # must be able to write ./data/values; on Linux set APP_UID/APP_GID to `id -u`/`id -g`
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     volumes:
       - ./data/values:/data/values
     deploy:

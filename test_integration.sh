@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -eo pipefail
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -10,7 +10,13 @@ log() { echo -e "${GREEN}[TEST]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail() { echo -e "${RED}[FAIL]${NC} $1"; cleanup; exit 1; }
 
+# apply/undo tests write to data/values; restore the originals however the run ends
+BACKUP=$(mktemp -d)
+cp data/values/*.value.json "$BACKUP"/
+
 cleanup() {
+    cp "$BACKUP"/*.value.json data/values/ 2>/dev/null || true
+    rm -rf data/values/.history
     warn "Stopping containers..."
     docker compose down --timeout 10 2>/dev/null || true
 }
