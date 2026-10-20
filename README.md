@@ -112,6 +112,8 @@ curl http://localhost:7000/history/ledger          # newest first: author, times
 curl -X POST "http://localhost:7000/undo/ledger?author=arda"   # roll back the latest change
 ```
 
+> **Linux hosts:** values-server writes `data/values` as uid/gid 1000 by default. If your checkout belongs to a different user, set `APP_UID=$(id -u)` and `APP_GID=$(id -g)` in `.env`.
+
 Writes are atomic: the new file is written to a temp file and then renamed over the old one. The audit log lives in `data/values/.history/<app>.jsonl`. Undo walks backwards one change at a time and is logged too, so the history is never rewritten.
 
 ### CLI

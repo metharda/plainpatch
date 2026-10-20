@@ -186,23 +186,17 @@ Bot Service ──HTTP POST──> Ollama (/api/chat)
    - Then atomically replaces the values file (write temp file → rename)
    - `POST /undo/<app>` restores the snapshot of the latest change that hasn't been undone, and logs that as a new entry
 
-6. **Response**
+7. **Response**
    ```json
    {
-     "appName": "ledger",
-     "workload": {
-       "statefulset": {
-         "ledger": {
-           "containers": {
-             "ledger": {
-               "resources": {
-                 "memory": {"limitMiB": 1024}
-               }
-             }
-           }
-         }
-       }
-     }
+     "app": "ledger",
+     "applied": false,
+     "revision": null,
+     "changes": [
+       {"op": "replace", "path": "/workload/container/resources/memory/limitMiB", "old": 2048, "new": 1024}
+     ],
+     "patch": [{"op": "replace", "path": "/workload/container/resources/memory/limitMiB", "value": 1024}],
+     "config": {"...": "full updated values"}
    }
    ```
 
@@ -371,7 +365,7 @@ Automated pipeline on push/PR (`.github/workflows/ci.yml`):
 
 - **Rate Limiting**: 10 requests/second per IP with burst of 20
 - **Security Headers**: X-Content-Type-Options, X-Frame-Options, X-XSS-Protection
-- **Reverse Proxy**: Routes `/edits`, `/schemas/*`, `/values/*`
+- **Reverse Proxy**: Routes `/edits`, `/history/*`, `/undo/*`, `/schemas/*`, `/values/*` (read-only: `GET` only)
 - **Metrics Proxy**: Aggregated access at `/metrics/schema`, `/metrics/values`, `/metrics/bot`
 
 ### Monitoring Stack
@@ -423,7 +417,7 @@ ai-config-tool/
 │   ├── requirements.txt
 │   ├── pytest.ini
 │   └── tests/
-│       └── test_app.py           # 35 unit tests
+│       └── test_app.py           # 45 unit tests
 │
 ├── schema-server/                # Schema service (port 7001)
 │   ├── app.py                    # FastAPI app serving JSON schemas
@@ -441,12 +435,12 @@ ai-config-tool/
 │   ├── requirements.txt
 │   ├── pytest.ini
 │   └── tests/
-│       └── test_app.py           # 14 unit tests
+│       └── test_app.py           # 21 unit tests
 │
 ├── cli/                          # Terminal client (stdlib only)
 │   ├── configbot.py              # preview / --apply / history / undo
 │   └── tests/
-│       └── test_configbot.py     # 8 unit tests
+│       └── test_configbot.py     # 16 unit tests
 │
 ├── data/
 │   ├── schemas/                  # JSON Schema definitions

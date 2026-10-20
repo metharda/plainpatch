@@ -243,9 +243,9 @@ RESULT1=$(curl -sf --max-time 120 -X POST http://localhost:7000/edits \
     -H "Content-Type: application/json" \
     -d '{"text": "set ledger service memory to 1024mb"}' 2>/dev/null)
 R1_EXIT=$?
-if [ "$R1_EXIT" = "0" ] && echo "$RESULT1" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+if [ "$R1_EXIT" = "0" ] && echo "$RESULT1" | python3 -c "import sys,json; sys.exit(not json.load(sys.stdin)['changes'])" 2>/dev/null; then
     show_json "$RESULT1" 20
-    check "0" "LLM set ledger memory to 1024mb"
+    check "0" "LLM proposed ledger memory 1024mb (diff)"
 elif ! $MODEL_READY; then
     check "0" "LLM test skipped (model not loaded) [SKIP]"
 else
@@ -259,9 +259,9 @@ RESULT2=$(curl -sf --max-time 120 -X POST http://localhost:7000/edits \
     -H "Content-Type: application/json" \
     -d '{"text": "set TENANT env to globex for orders service"}' 2>/dev/null)
 R2_EXIT=$?
-if [ "$R2_EXIT" = "0" ] && echo "$RESULT2" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+if [ "$R2_EXIT" = "0" ] && echo "$RESULT2" | python3 -c "import sys,json; sys.exit(not json.load(sys.stdin)['changes'])" 2>/dev/null; then
     show_json "$RESULT2" 20
-    check "0" "LLM added the orders TENANT env"
+    check "0" "LLM proposed adding the orders TENANT env (diff)"
 elif ! $MODEL_READY; then
     check "0" "LLM test skipped (model not loaded) [SKIP]"
 else
@@ -275,9 +275,9 @@ RESULT3=$(curl -sf --max-time 120 -X POST http://localhost:7000/edits \
     -H "Content-Type: application/json" \
     -d '{"text": "lower cpu limit of storefront service to 80%"}' 2>/dev/null)
 R3_EXIT=$?
-if [ "$R3_EXIT" = "0" ] && echo "$RESULT3" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+if [ "$R3_EXIT" = "0" ] && echo "$RESULT3" | python3 -c "import sys,json; sys.exit(not json.load(sys.stdin)['changes'])" 2>/dev/null; then
     show_json "$RESULT3" 20
-    check "0" "LLM lowered storefront service CPU to 80%"
+    check "0" "LLM proposed lowering storefront service CPU to 80% (diff)"
 elif ! $MODEL_READY; then
     check "0" "LLM test skipped (model not loaded) [SKIP]"
 else
@@ -497,7 +497,7 @@ echo -e "    • Monitoring (Prometheus + Grafana dashboard)"
 echo -e "    • API Gateway (Nginx + rate limiting + security headers)"
 echo -e "    • CI/CD (GitHub Actions: lint → test → build → security)"
 echo -e "    • Docker best practices (multi-stage, non-root, healthcheck)"
-echo -e "    • 39 unit tests + integration tests"
+echo -e "    • 89 unit tests + integration tests"
 echo -e "    • Pre-commit hooks + Ruff linting"
 echo ""
 
