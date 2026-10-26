@@ -110,6 +110,7 @@ services:
         --model=${OLLAMA_MODEL:-qwen2.5:3b}
         --schema-url=${SCHEMA_URL:-http://schema-server:7001}
         --values-url=${VALUES_URL:-http://values-server:7002}
+        --num-ctx=${LLM_NUM_CTX:-16384}
     deploy:
       resources:
         limits:

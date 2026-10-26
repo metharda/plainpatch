@@ -3,7 +3,6 @@ import asyncio
 import json
 import logging
 import random
-import re
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -27,6 +26,7 @@ from prompts import (
     EXTRACT_APP_USER,
     MODIFY_CONFIG_SYSTEM,
     MODIFY_CONFIG_USER,
+    RETRY_FEEDBACK,
 )
 
 
@@ -87,6 +87,9 @@ class Config:
     max_retries: int = 3
     base_delay: float = 1.0
     max_delay: float = 30.0
+    # one value for every call: Ollama reloads the model whenever num_ctx changes between requests
+    num_ctx: int = 16384
+    keep_alive: str = "30m"
 
 
 config = Config()
@@ -110,13 +113,47 @@ app = FastAPI(title="Bot Service", version="1.0.0", lifespan=lifespan)
 Instrumentator().instrument(app).expose(app)
 
 
+class TruncatedOutputError(ValueError):
+    pass
+
+
+# Structured outputs: Ollama compiles these JSON Schemas into a grammar, so the model
+# can only emit tokens that produce matching JSON (no prose, no code fences).
+APP_FORMAT = {
+    "type": "object",
+    "properties": {"app": {"type": "string", "enum": [*APPS, "none"]}},
+    "required": ["app"],
+}
+
+PATCH_FORMAT = {
+    # wrapped in an object: top-level array schemas are less reliable across Ollama versions
+    "type": "object",
+    "properties": {
+        "operations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["add", "remove", "replace", "move", "copy", "test"]},
+                    "path": {"type": "string"},
+                    "value": {},  # any JSON value
+                    "from": {"type": "string"},
+                },
+                "required": ["op", "path"],
+            },
+        },
+    },
+    "required": ["operations"],
+}
+
+
 def exponential_backoff(attempt: int) -> float:
     delay = min(config.base_delay * (2 ** attempt), config.max_delay)
     jitter = random.uniform(0, delay * 0.1)
     return delay + jitter
 
 
-async def call_llm(system: str, user: str) -> str:
+async def call_llm(system: str, user: str, fmt: dict, num_predict: int) -> str:
     if not circuit_breaker.can_execute():
         raise HTTPException(503, "Service temporarily unavailable (circuit open)")
 
@@ -132,12 +169,19 @@ async def call_llm(system: str, user: str) -> str:
                             {"role": "user", "content": user}
                         ],
                         "stream": False,
-                        "options": {"temperature": 0.1, "num_predict": 8192}
+                        "format": fmt,
+                        "keep_alive": config.keep_alive,
+                        "options": {
+                            "temperature": 0,
+                            "num_ctx": config.num_ctx,
+                            "num_predict": num_predict,
+                        },
                     }
                 )
                 resp.raise_for_status()
                 circuit_breaker.record_success()
-                return resp.json()["message"]["content"].strip()
+                data = resp.json()
+                break
 
         except httpx.TimeoutException:
             log.warning("LLM timeout", extra={"attempt": attempt + 1})
@@ -149,8 +193,19 @@ async def call_llm(system: str, user: str) -> str:
             log.info("Retrying", extra={"delay": delay})
             await asyncio.sleep(delay)
 
-    circuit_breaker.record_failure()
-    raise HTTPException(502, f"LLM unavailable after {config.max_retries} attempts")
+    else:
+        circuit_breaker.record_failure()
+        raise HTTPException(502, f"LLM unavailable after {config.max_retries} attempts")
+
+    # Ollama silently drops the start of prompts longer than num_ctx; this is the only trace of it
+    # ponytail: heuristic (prompt caching lowers the count); count tokens up front if this ever misfires
+    if data.get("prompt_eval_count", 0) + num_predict >= config.num_ctx:
+        log.warning("Prompt may have been truncated, raise --num-ctx", extra={
+            "prompt_eval_count": data.get("prompt_eval_count"), "num_ctx": config.num_ctx,
+        })
+    if data.get("done_reason") == "length":
+        raise TruncatedOutputError(f"reply was cut off at the {num_predict}-token limit")
+    return data["message"]["content"]
 
 
 async def fetch_json(url: str, method: str = "GET", payload: dict | None = None) -> dict:
@@ -175,27 +230,6 @@ async def fetch_json(url: str, method: str = "GET", payload: dict | None = None)
     return resp.json()
 
 
-def extract_json(text: str) -> str:
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
-    if match:
-        return match.group(1)
-    # find every top-level span that parses as JSON and keep the longest,
-    # so prose like "see [1]" around the real answer doesn't win
-    decoder = json.JSONDecoder()
-    best, pos = "", 0
-    for m in re.finditer(r"[\[{]", text):
-        if m.start() < pos:
-            continue
-        try:
-            _, end = decoder.raw_decode(text, m.start())
-        except ValueError:
-            continue
-        if end - m.start() > len(best):
-            best = text[m.start():end]
-        pos = end
-    return best or text
-
-
 def reject_constant(name: str):
     # Python's json accepts NaN/Infinity, which then can't be serialised in the response
     raise ValueError(f"{name} is not valid JSON")
@@ -209,18 +243,15 @@ def check_op(op) -> dict:
         raise jsonpatch.InvalidJsonPatch(f"Invalid patch operation: {op!r}")
     if op["op"] in ("move", "copy") and not isinstance(op.get("from"), str):
         raise jsonpatch.InvalidJsonPatch(f"'{op['op']}' needs a string 'from': {op!r}")
+    if op["op"] in ("add", "replace", "test") and "value" not in op:
+        raise jsonpatch.InvalidJsonPatch(f"'{op['op']}' needs a 'value': {op!r}")
     return op
 
 
-def to_patch(parsed, values: dict) -> list[dict]:
-    if isinstance(parsed, dict) and "op" in parsed:
-        return [check_op(parsed)]
-    # small models sometimes ignore the instructions and return the whole config; diff it back into a patch
-    if isinstance(parsed, dict):
-        return jsonpatch.make_patch(values, parsed).patch
-    if isinstance(parsed, list):
-        return [check_op(op) for op in parsed]
-    raise jsonpatch.InvalidJsonPatch("Expected a list of patch operations")
+def to_patch(parsed) -> list[dict]:
+    if not (isinstance(parsed, dict) and isinstance(parsed.get("operations"), list)):
+        raise jsonpatch.InvalidJsonPatch('Expected {"operations": [...]}')
+    return [check_op(op) for op in parsed["operations"]]
 
 
 def describe(patch: list[dict], values: dict) -> list[dict]:
@@ -258,20 +289,14 @@ async def process_message(req: EditRequest):
     request_id = f"{int(time.time() * 1000)}"
     log.info("Processing request", extra={"request_id": request_id, "text": user_input[:100]})
 
-    # Stage 1: Extract app name
-    app_name = None
-    for attempt in range(config.max_retries):
-        prompt = EXTRACT_APP_USER.format(input=user_input)
-        response = await call_llm(EXTRACT_APP_SYSTEM, prompt)
-        candidate = response.lower().strip()
+    # Stage 1: Extract app name (the enum in APP_FORMAT means no free-text parsing or retries)
+    response = await call_llm(EXTRACT_APP_SYSTEM, EXTRACT_APP_USER.format(input=user_input), APP_FORMAT, 32)
+    try:
+        app_name = json.loads(response)["app"]
+    except (ValueError, KeyError, TypeError):
+        app_name = None
 
-        if candidate in APPS:
-            app_name = candidate
-            break
-
-        log.warning("Invalid app name", extra={"response": candidate, "attempt": attempt + 1})
-
-    if not app_name:
+    if app_name not in APPS:
         raise HTTPException(400, f"Could not identify app. Available: {', '.join(APPS)}")
 
     log.info("App identified", extra={"request_id": request_id, "app": app_name})
@@ -281,26 +306,30 @@ async def process_message(req: EditRequest):
     values = await fetch_json(f"{config.values_url}/{app_name}")
 
     # Stage 2: Modify configuration
+    # minified JSON is ~3x fewer tokens than indent=2, which keeps big schemas inside num_ctx
+    prompt = MODIFY_CONFIG_USER.format(
+        input=user_input,
+        schema=json.dumps(schema, separators=(",", ":")),
+        values=json.dumps(values, separators=(",", ":")),
+    )
+    feedback = ""
     for attempt in range(config.max_retries):
-        prompt = MODIFY_CONFIG_USER.format(
-            input=user_input,
-            schema=json.dumps(schema, indent=2),
-            values=json.dumps(values, indent=2)
-        )
-
-        response = await call_llm(MODIFY_CONFIG_SYSTEM, prompt)
-
         try:
-            patch = to_patch(json.loads(extract_json(response), parse_constant=reject_constant), values)
+            response = await call_llm(MODIFY_CONFIG_SYSTEM, prompt + feedback, PATCH_FORMAT, 2048)
+            patch = to_patch(json.loads(response, parse_constant=reject_constant))
             result = jsonpatch.apply_patch(values, patch)
             validate(instance=result, schema=schema)
             break
-        except ValueError as e:  # includes json.JSONDecodeError
-            log.warning("JSON parse error", extra={"error": str(e), "attempt": attempt + 1})
+        except ValueError as e:  # includes json.JSONDecodeError and TruncatedOutputError
+            error = f"invalid JSON: {e}"
         except (jsonpatch.JsonPatchException, jsonpointer.JsonPointerException) as e:
-            log.warning("Invalid patch", extra={"error": str(e), "attempt": attempt + 1})
+            error = f"patch could not be applied: {e}"
         except ValidationError as e:
-            log.warning("Schema validation error", extra={"error": e.message, "attempt": attempt + 1})
+            error = f"result violates the schema at /{'/'.join(map(str, e.absolute_path))}: {e.message}"
+
+        log.warning("Rejected LLM output", extra={"error": error, "attempt": attempt + 1})
+        # temperature is 0, so retrying the same prompt would reproduce the same mistake
+        feedback = RETRY_FEEDBACK.format(error=error[:500])
     else:
         raise HTTPException(500, "Failed to generate valid configuration")
 
@@ -350,12 +379,14 @@ def main():
     parser.add_argument("--model", default="qwen2.5:3b")
     parser.add_argument("--schema-url", default="http://schema-server:7001")
     parser.add_argument("--values-url", default="http://values-server:7002")
+    parser.add_argument("--num-ctx", type=int, default=Config.num_ctx)
     args = parser.parse_args()
 
     config.ollama_url = args.ollama_url
     config.model = args.model
     config.schema_url = args.schema_url
     config.values_url = args.values_url
+    config.num_ctx = args.num_ctx
 
     host, port = args.listen.rsplit(":", 1)
 

@@ -4,11 +4,11 @@ EXTRACT_APP_SYSTEM = """You extract application names from user requests.
 
 Available apps: storefront, ledger, orders
 
-Rules:
-- Return ONLY the app name, nothing else
+Return JSON: {"app": "<name>"}
 - If user says "storefront" or "storefront service" → storefront
 - If user says "ledger" or "ledger service" → ledger
-- If user says "orders" or "orders service" → orders"""
+- If user says "orders" or "orders service" → orders
+- If the request is not clearly about one of these apps → none"""
 
 EXTRACT_APP_USER = """Request: "{input}"
 
@@ -17,7 +17,7 @@ App name:"""
 MODIFY_CONFIG_SYSTEM = """You modify JSON configurations by returning a JSON Patch (RFC 6902).
 
 Rules:
-- Return ONLY a JSON array of patch operations, no explanations or markdown
+- Return a JSON object {"operations": [...]} where each operation is {"op", "path", "value"}
 - "replace" changes an existing field, "add" creates a new one (e.g. a new env var), "remove" deletes one
 - Paths are JSON Pointers into the current config
 - Only change what the user asks for
@@ -30,7 +30,7 @@ Key paths:
 - Env vars: /workload/container/envs/[VAR_NAME]
 
 Example:
-[{"op": "replace", "path": "/workload/container/resources/memory/limitMiB", "value": 1024}]"""
+{"operations": [{"op": "replace", "path": "/workload/container/resources/memory/limitMiB", "value": 1024}]}"""
 
 MODIFY_CONFIG_USER = """User request: "{input}"
 
@@ -41,3 +41,8 @@ Current config:
 {values}
 
 Return the JSON Patch:"""
+
+RETRY_FEEDBACK = """
+
+Your previous answer was rejected: {error}
+Return a corrected JSON Patch."""
