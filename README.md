@@ -13,6 +13,7 @@ The system understands the request, determines **which application is being refe
 ### Highlights
 
 - **Surgical edits with JSON Patch.** The LLM returns only the operations it wants to make (RFC 6902) instead of rewriting the whole config. That is faster, more reliable on a small local model, and nothing outside the patch can change by accident.
+- **Structured outputs.** Both LLM calls use Ollama's `format` field with a JSON Schema, so the model can only produce JSON in the expected shape, with no prose or code fences. Retries include the previous error, and the context window is set explicitly so the large schemas aren't silently truncated.
 - **Diff-first.** Every response includes a readable list of `changes` (`path: old → new`), so you see exactly what will change before anything is saved.
 - **Apply, audit, undo.** Add `"apply": true` to save a change. Every write is logged with author, message and patch, and any change can be rolled back with one call.
 - **Terminal client.** `configbot "lower storefront cpu to 80%" --apply` gives you a colored diff in your shell. It uses only the Python standard library.
@@ -275,6 +276,7 @@ All configurable via `.env` file (see `.env.example`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OLLAMA_MODEL` | `qwen2.5:3b` | LLM model for Ollama |
+| `LLM_NUM_CTX` | `16384` | Context window sent with every LLM call (must fit schema + config + reply) |
 | `SCHEMA_PORT` | `7001` | Schema service port |
 | `VALUES_PORT` | `7002` | Values service port |
 | `BOT_PORT` | `7000` | Bot service port |

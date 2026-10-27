@@ -97,7 +97,24 @@ Stage 2: Configuration Modification
 - The values files are large; asking a 3B model to re-emit all of it is slow and it silently drops or reorders fields
 - A patch is a few lines: faster to generate, and nothing outside the patch can change by accident
 - The patch doubles as a human-readable diff (`changes` in the response) and as the audit-log entry
-- If the model ignores instructions and returns the whole config anyway, the bot diffs it back into a patch
+
+### 3. Structured Outputs and the Context Window
+
+Both LLM calls use Ollama's **structured outputs**: the `format` field carries a JSON Schema, which Ollama compiles into a grammar, so the model can only produce tokens that form matching JSON.
+
+| Call | `format` | Effect |
+|------|----------|--------|
+| Pick the app | `{"app": enum[storefront, ledger, orders, none]}` | Always one valid answer, so there's no free-text parsing and no blind retries. `none` keeps unrelated requests from being forced onto an app |
+| Edit the config | `{"operations": [{op: enum, path, value?, from?}]}` | No prose or code fences to strip. The array is wrapped in an object because top-level array schemas are less reliable |
+
+Grammar constraints guarantee the *shape* of the JSON, not that it's *correct*, so the bot still checks per-op rules (e.g. `replace` needs a `value`), applies the patch (paths must exist), and validates the result against the app's schema.
+
+Other settings sent with every call:
+- **`temperature: 0`**, following Ollama's guidance for structured outputs. Because sampling is deterministic, a retry with the same prompt would repeat the same mistake, so **each retry appends the previous error** (bad path, schema violation) to the prompt.
+- **`num_ctx` (default 16384, `--num-ctx` / `LLM_NUM_CTX`).** On machines with less than 24 GiB VRAM, Ollama defaults to a 4k context and silently drops the *start* of longer prompts. The same value goes on both calls, because a different `num_ctx` makes Ollama reload the model.
+- **Minified schema/config in the prompt.** The largest schema (orders) is about 5k tokens with `indent=2` and about 2.5k minified.
+- **`done_reason == "length"`** (the reply hit `num_predict`) counts as a failed attempt and is retried. A `prompt_eval_count` near `num_ctx` logs a truncation warning.
+- **`keep_alive: 30m`** keeps the model loaded between requests.
 
 **Benefits:**
 - Reduced token usage per request
@@ -107,7 +124,7 @@ Stage 2: Configuration Modification
 
 **Trade-off:** Added latency (~1-2s extra) for improved reliability.
 
-### 3. Technology Stack Choices
+### 4. Technology Stack Choices
 
 | Component | Choice | Reasoning |
 |-----------|--------|-----------|
@@ -417,7 +434,7 @@ ai-config-tool/
 │   ├── requirements.txt
 │   ├── pytest.ini
 │   └── tests/
-│       └── test_app.py           # 45 unit tests
+│       └── test_app.py           # 44 unit tests
 │
 ├── schema-server/                # Schema service (port 7001)
 │   ├── app.py                    # FastAPI app serving JSON schemas
