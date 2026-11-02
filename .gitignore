@@ -17,3 +17,4 @@ data/values/.history/
 .DS_Store
 Thumbs.db
 .env
+evals/results/

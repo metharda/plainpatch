@@ -1,5 +1,5 @@
 .PHONY: help build up down logs test lint clean restart status \
-       monitoring-up gateway-up full-up test-coverage test-integration showcase
+       monitoring-up gateway-up full-up test-coverage test-integration showcase eval
 
 help:
 	@echo ""
@@ -23,6 +23,7 @@ help:
 	@echo "    make test           Run all unit tests"
 	@echo "    make test-coverage  Run tests with coverage report"
 	@echo "    make test-integration  Run integration test suite"
+	@echo "    make eval           Score the bot on labeled requests against a real Ollama"
 	@echo "    make lint           Run code linting (ruff)"
 	@echo "    make showcase       Run feature showcase"
 	@echo ""
@@ -101,6 +102,9 @@ test-coverage:
 test-integration:
 	@bash test_integration.sh
 
+eval:
+	@python3 evals/run.py --set all
+
 showcase:
 	@bash showcase.sh
 
@@ -116,6 +120,8 @@ lint:
 	@echo ""
 	@echo "Linting cli..."
 	@ruff check cli/
+	@echo "Linting evals..."
+	@ruff check evals/
 	@echo ""
 	@echo "All lint checks passed!"
 
