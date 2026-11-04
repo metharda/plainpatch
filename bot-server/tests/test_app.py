@@ -13,13 +13,17 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app import (
+    PATCH_CACHE,
+    PATCH_FORMAT,
     CircuitBreaker,
     app,
     circuit_breaker,
     config,
     describe,
     exponential_backoff,
+    route_app,
 )
+from prompts import MODIFY_CONFIG_USER
 
 
 @pytest.fixture
@@ -32,6 +36,7 @@ def reset_circuit_breaker():
     circuit_breaker.failures = 0
     circuit_breaker.state = "closed"
     circuit_breaker.last_failure = 0.0
+    PATCH_CACHE.clear()
     yield
 
 
@@ -186,7 +191,6 @@ class TestProcessMessageWithMock:
     def test_successful_message_flow(self, mock_llm, mock_fetch, client):
         # Arrange: LLM returns app name, then modified JSON
         mock_llm.side_effect = self._mock_call_llm([
-            APP,
             PATCH_REPLY,
         ])
         mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
@@ -221,7 +225,6 @@ class TestProcessMessageWithMock:
     def test_invalid_json_from_llm_retries(self, mock_llm, mock_fetch, client):
         # Arrange: LLM returns invalid JSON first, then valid JSON
         mock_llm.side_effect = self._mock_call_llm([
-            APP,
             "not valid json at all",
             "still not json",
             PATCH_REPLY,
@@ -245,7 +248,6 @@ class TestProcessMessageWithMock:
             "additionalProperties": False,
         }
         mock_llm.side_effect = self._mock_call_llm([
-            APP,
             ops({"op": "add", "path": "/badField", "value": 123}),  # fails schema validation
             ops({"op": "add", "path": "/badField", "value": 456}),  # fails again
             ops({"op": "remove", "path": "/workload"}),  # passes
@@ -263,7 +265,6 @@ class TestProcessMessageWithMock:
     def test_all_retries_fail_returns_500(self, mock_llm, mock_fetch, client):
         # Arrange: LLM always returns invalid JSON
         mock_llm.side_effect = self._mock_call_llm([
-            APP,
             "not json", "not json", "not json",
         ])
         mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
@@ -312,7 +313,7 @@ class TestJsonPatchEdits:
     @patch("app.fetch_json")
     @patch("app.call_llm")
     def test_patch_is_applied_and_described(self, mock_llm, mock_fetch, client):
-        mock_llm.side_effect = self._llm(APP, PATCH_REPLY)
+        mock_llm.side_effect = self._llm(PATCH_REPLY)
         mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
 
         data = client.post("/edits", json={"text": "set ledger memory to 1024mb"}).json()
@@ -327,7 +328,7 @@ class TestJsonPatchEdits:
     @patch("app.call_llm")
     def test_patch_to_missing_path_is_retried(self, mock_llm, mock_fetch, client):
         bad = ops({"op": "replace", "path": "/does/not/exist", "value": 1})
-        mock_llm.side_effect = self._llm(APP, bad, '{"operations": ["not an op"]}', PATCH_REPLY)
+        mock_llm.side_effect = self._llm(bad, '{"operations": ["not an op"]}', PATCH_REPLY)
         mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
 
         resp = client.post("/edits", json={"text": "set ledger memory to 1024mb"})
@@ -338,7 +339,7 @@ class TestJsonPatchEdits:
     @patch("app.fetch_json")
     @patch("app.call_llm")
     def test_apply_persists_to_values_service(self, mock_llm, mock_fetch, client):
-        mock_llm.side_effect = self._llm(APP, PATCH_REPLY)
+        mock_llm.side_effect = self._llm(PATCH_REPLY)
         mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES, {"id": 7}]
 
         data = client.post("/edits", json={
@@ -354,7 +355,7 @@ class TestJsonPatchEdits:
     @patch("app.fetch_json")
     @patch("app.call_llm")
     def test_apply_with_no_changes_writes_nothing(self, mock_llm, mock_fetch, client):
-        mock_llm.side_effect = self._llm(APP, '{"operations": []}')
+        mock_llm.side_effect = self._llm('{"operations": []}')
         mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
 
         data = client.post("/edits", json={"text": "set ledger memory to 2048mb", "apply": True}).json()
@@ -410,7 +411,7 @@ class TestReviewRegressions:
     @patch("app.fetch_json")
     @patch("app.call_llm")
     def test_bad_ops_are_retried_not_crashed(self, mock_llm, mock_fetch, client, bad_reply):
-        mock_llm.side_effect = self._llm(APP, bad_reply, PATCH_REPLY)
+        mock_llm.side_effect = self._llm(bad_reply, PATCH_REPLY)
         mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
 
         resp = client.post("/edits", json={"text": "set ledger memory to 1024mb"})
@@ -456,7 +457,7 @@ class TestStructuredOutputs:
             200, json={"message": {"content": next(replies)}, "done_reason": "stop", "prompt_eval_count": 100}))
         mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
 
-        assert client.post("/edits", json={"text": "set ledger memory to 1024mb"}).status_code == 200
+        assert client.post("/edits", json={"text": "set the statefulset memory to 1024mb"}).status_code == 200
 
         stage1, stage2 = (json.loads(call.request.content) for call in route.calls)
         assert stage1["format"]["properties"]["app"]["enum"] == ["storefront", "ledger", "orders", "none"]
@@ -471,7 +472,6 @@ class TestStructuredOutputs:
     @patch("app.fetch_json")
     def test_reply_cut_off_at_token_limit_is_retried(self, mock_fetch, client):
         replies = iter([
-            {"message": {"content": APP}, "done_reason": "stop"},
             {"message": {"content": '{"operations": [{"op": "repl'}, "done_reason": "length"},
             {"message": {"content": PATCH_REPLY}, "done_reason": "stop"},
         ])
@@ -487,7 +487,7 @@ class TestStructuredOutputs:
     @patch("app.fetch_json")
     @patch("app.call_llm")
     def test_retry_prompt_carries_the_previous_error(self, mock_llm, mock_fetch, client):
-        replies = iter([APP, ops({"op": "replace", "path": "/nope", "value": 1}), PATCH_REPLY])
+        replies = iter([ops({"op": "replace", "path": "/nope", "value": 1}), PATCH_REPLY])
 
         async def _side_effect(*args):
             return next(replies)
@@ -497,7 +497,7 @@ class TestStructuredOutputs:
 
         client.post("/edits", json={"text": "set ledger memory to 1024mb"})
 
-        first_try, retry = mock_llm.call_args_list[1].args[1], mock_llm.call_args_list[2].args[1]
+        first_try, retry = mock_llm.call_args_list[0].args[1], mock_llm.call_args_list[1].args[1]
         assert "rejected" not in first_try
         assert retry.startswith(first_try)
         assert "Your previous answer was rejected: patch could not be applied" in retry
@@ -513,3 +513,65 @@ class TestStructuredOutputs:
 
         assert resp.status_code == 400
         assert mock_llm.call_count == 1  # no blind retries: the enum already forces a valid answer
+
+
+class TestRoutingAndCache:
+    @pytest.mark.parametrize("text, expected", [
+        ("set ledger memory to 1gb", "ledger"),
+        ("Scale STOREFRONT to 3 replicas", "storefront"),
+        ("set TENANT to storefront-lobby for orders", None),  # two app names: let the LLM decide
+        ("set the statefulset memory to 1gb", None),
+        ("restorefront the ordersservice", None),  # substrings don't count
+    ])
+    def test_route_app(self, text, expected):
+        assert route_app(text) == expected
+
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_named_app_skips_the_classifier(self, mock_llm, mock_fetch, client):
+        async def _side_effect(system, user, fmt, num_predict):
+            assert fmt is PATCH_FORMAT, "classifier should not be called"
+            return PATCH_REPLY
+
+        mock_llm.side_effect = _side_effect
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
+
+        resp = client.post("/edits", json={"text": "set ledger memory to 1024mb"})
+
+        assert resp.status_code == 200
+        assert mock_llm.call_count == 1
+
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_repeat_request_is_served_from_cache(self, mock_llm, mock_fetch, client):
+        async def _side_effect(*args):
+            return PATCH_REPLY
+
+        mock_llm.side_effect = _side_effect
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES] * 2
+
+        first = client.post("/edits", json={"text": "set ledger memory to 1024mb"}).json()
+        second = client.post("/edits", json={"text": "  Set Ledger memory   to 1024MB "}).json()
+
+        assert second == first
+        assert mock_llm.call_count == 1
+
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_cache_misses_when_config_changed(self, mock_llm, mock_fetch, client):
+        async def _side_effect(*args):
+            return PATCH_REPLY
+
+        mock_llm.side_effect = _side_effect
+        changed = json.loads(json.dumps(SAMPLE_VALUES))
+        changed["app"] = "other"
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES, SAMPLE_SCHEMA, changed]
+
+        client.post("/edits", json={"text": "set ledger memory to 1024mb"})
+        client.post("/edits", json={"text": "set ledger memory to 1024mb"})
+
+        assert mock_llm.call_count == 2
+
+    def test_request_comes_after_the_static_prompt(self):
+        prompt = MODIFY_CONFIG_USER.format(input="REQ", schema="SCHEMA", values="VALUES")
+        assert prompt.index("SCHEMA") < prompt.index("VALUES") < prompt.index("REQ")

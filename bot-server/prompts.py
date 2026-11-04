@@ -32,13 +32,14 @@ Key paths:
 Example:
 {"operations": [{"op": "replace", "path": "/workload/container/resources/memory/limitMiB", "value": 1024}]}"""
 
-MODIFY_CONFIG_USER = """User request: "{input}"
-
-JSON Schema:
+# static parts first, request last: Ollama reuses the cached prompt prefix across requests
+MODIFY_CONFIG_USER = """JSON Schema:
 {schema}
 
 Current config:
 {values}
+
+User request: "{input}"
 
 Return the JSON Patch:"""
 

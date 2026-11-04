@@ -1,10 +1,13 @@
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import random
+import re
 import sys
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlsplit
@@ -203,6 +206,13 @@ async def call_llm(system: str, user: str, fmt: dict, num_predict: int) -> str:
         log.warning("Prompt may have been truncated, raise --num-ctx", extra={
             "prompt_eval_count": data.get("prompt_eval_count"), "num_ctx": config.num_ctx,
         })
+    log.info("LLM call", extra={
+        "prompt_tokens": data.get("prompt_eval_count"),
+        "cached_tokens": data.get("prompt_eval_cached_count"),  # prefix reused from Ollama's prompt cache
+        "prompt_ms": round(data.get("prompt_eval_duration", 0) / 1e6),
+        "eval_ms": round(data.get("eval_duration", 0) / 1e6),
+        "load_ms": round(data.get("load_duration", 0) / 1e6),  # large values mean the model was (re)loaded
+    })
     if data.get("done_reason") == "length":
         raise TruncatedOutputError(f"reply was cut off at the {num_predict}-token limit")
     return data["message"]["content"]
@@ -267,6 +277,25 @@ def describe(patch: list[dict], values: dict) -> list[dict]:
     ]
 
 
+def route_app(text: str) -> str | None:
+    """Pick the app without the LLM when exactly one app name appears as a word."""
+    found = {a for a in APPS if re.search(rf"\b{a}\b", text, re.IGNORECASE)}
+    return found.pop() if len(found) == 1 else None
+
+
+# exact-match cache: same request against the same config → same patch, no LLM call
+# ponytail: in-process LRU, lost on restart and not shared between replicas
+PATCH_CACHE: OrderedDict[str, list[dict]] = OrderedDict()
+PATCH_CACHE_SIZE = 256
+
+
+def cache_key(user_input: str, app_name: str, values: dict, schema: dict) -> str:
+    normalized = " ".join(user_input.lower().split())
+    # hashing schema too means a cached patch is always valid again (same input, same validation)
+    digest = hashlib.sha256(json.dumps([values, schema], sort_keys=True).encode()).hexdigest()
+    return f"{app_name}|{digest}|{normalized}"
+
+
 def require_known_app(app_name: str):
     if app_name not in APPS:
         raise HTTPException(404, f"Unknown app: {app_name}. Available: {', '.join(APPS)}")
@@ -289,12 +318,15 @@ async def process_message(req: EditRequest):
     request_id = f"{int(time.time() * 1000)}"
     log.info("Processing request", extra={"request_id": request_id, "text": user_input[:100]})
 
-    # Stage 1: Extract app name (the enum in APP_FORMAT means no free-text parsing or retries)
-    response = await call_llm(EXTRACT_APP_SYSTEM, EXTRACT_APP_USER.format(input=user_input), APP_FORMAT, 32)
-    try:
-        app_name = json.loads(response)["app"]
-    except (ValueError, KeyError, TypeError):
-        app_name = None
+    # Stage 1: Extract app name; the LLM is only asked when the request doesn't name exactly one app
+    app_name = route_app(user_input)
+    if app_name is None:
+        # the enum in APP_FORMAT means no free-text parsing or retries
+        response = await call_llm(EXTRACT_APP_SYSTEM, EXTRACT_APP_USER.format(input=user_input), APP_FORMAT, 32)
+        try:
+            app_name = json.loads(response)["app"]
+        except (ValueError, KeyError, TypeError):
+            app_name = None
 
     if app_name not in APPS:
         raise HTTPException(400, f"Could not identify app. Available: {', '.join(APPS)}")
@@ -312,13 +344,21 @@ async def process_message(req: EditRequest):
         schema=json.dumps(schema, separators=(",", ":")),
         values=json.dumps(values, separators=(",", ":")),
     )
+    key = cache_key(user_input, app_name, values, schema)
     feedback = ""
     for attempt in range(config.max_retries):
         try:
-            response = await call_llm(MODIFY_CONFIG_SYSTEM, prompt + feedback, PATCH_FORMAT, 2048)
-            patch = to_patch(json.loads(response, parse_constant=reject_constant))
+            if key in PATCH_CACHE:
+                PATCH_CACHE.move_to_end(key)
+                patch = PATCH_CACHE[key]
+            else:
+                response = await call_llm(MODIFY_CONFIG_SYSTEM, prompt + feedback, PATCH_FORMAT, 2048)
+                patch = to_patch(json.loads(response, parse_constant=reject_constant))
             result = jsonpatch.apply_patch(values, patch)
             validate(instance=result, schema=schema)
+            PATCH_CACHE[key] = patch
+            if len(PATCH_CACHE) > PATCH_CACHE_SIZE:
+                PATCH_CACHE.popitem(last=False)
             break
         except ValueError as e:  # includes json.JSONDecodeError and TruncatedOutputError
             error = f"invalid JSON: {e}"
