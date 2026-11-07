@@ -122,33 +122,12 @@ class TruncatedOutputError(ValueError):
 
 # Structured outputs: Ollama compiles these JSON Schemas into a grammar, so the model
 # can only emit tokens that produce matching JSON (no prose, no code fences).
+# The edit call's schema is built per config by patch_format().
 APP_FORMAT = {
     "type": "object",
     "properties": {"app": {"type": "string", "enum": [*APPS, "none"]}},
     "required": ["app"],
 }
-
-PATCH_FORMAT = {
-    # wrapped in an object: top-level array schemas are less reliable across Ollama versions
-    "type": "object",
-    "properties": {
-        "operations": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "op": {"type": "string", "enum": ["add", "remove", "replace", "move", "copy", "test"]},
-                    "path": {"type": "string"},
-                    "value": {},  # any JSON value
-                    "from": {"type": "string"},
-                },
-                "required": ["op", "path"],
-            },
-        },
-    },
-    "required": ["operations"],
-}
-
 
 def exponential_backoff(attempt: int) -> float:
     delay = min(config.base_delay * (2 ** attempt), config.max_delay)
@@ -181,6 +160,10 @@ async def call_llm(system: str, user: str, fmt: dict, num_predict: int) -> str:
                         },
                     }
                 )
+                if resp.status_code == 500 and "prediction aborted" in resp.text:
+                    # Ollama stopped a degenerate reply (e.g. "token repeat limit reached"): a bad answer, not an outage
+                    circuit_breaker.record_success()
+                    raise TruncatedOutputError(resp.json().get("error", "prediction aborted"))
                 resp.raise_for_status()
                 circuit_breaker.record_success()
                 data = resp.json()
@@ -258,10 +241,70 @@ def check_op(op) -> dict:
     return op
 
 
+MAP_CONTAINERS = ("envs",)  # objects where "add" may create new keys
+
+
+def escape(key: str) -> str:
+    return key.replace("~", "~0").replace("/", "~1")
+
+
+def editable_paths(values: dict) -> list[str]:
+    """Every leaf pointer in the config, plus map containers that accept new keys."""
+    paths = []
+
+    def walk(node, path):
+        if path.rsplit("/", 1)[-1] in MAP_CONTAINERS:
+            paths.append(path)
+        if isinstance(node, dict) and node:
+            for k, v in node.items():
+                walk(v, f"{path}/{escape(k)}")
+        elif isinstance(node, list) and node:
+            for i, v in enumerate(node):
+                walk(v, f"{path}/{i}")
+        elif path not in paths and node != {}:  # empty objects only count as maps (MAP_CONTAINERS)
+            paths.append(path)
+
+    walk(values, "")
+    return paths
+
+
+def patch_format(values: dict) -> dict:
+    # the grammar only allows paths that exist, so the model can't invent pointers
+    paths = editable_paths(values)
+    leaves = [p for p in paths if p.rsplit("/", 1)[-1] not in MAP_CONTAINERS]
+    maps = [p for p in paths if p.rsplit("/", 1)[-1] in MAP_CONTAINERS]
+    scalar = {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}
+    edit = {
+        "type": "object",
+        "properties": {"op": {"type": "string", "enum": ["replace", "remove"]},
+                       "path": {"type": "string", "enum": leaves}, "value": scalar},
+        "required": ["op", "path"],
+    }
+    # adding a map entry is its own shape with "key" required, or the model skips it
+    add_key = {
+        "type": "object",
+        "properties": {"op": {"type": "string", "enum": ["add"]}, "path": {"type": "string", "enum": maps},
+                       "key": {"type": "string"}, "value": {"type": "string"}},
+        "required": ["op", "path", "key", "value"],
+    }
+    return {
+        "type": "object",
+        "properties": {"operations": {"type": "array", "items": {"anyOf": [edit, add_key] if maps else [edit]}}},
+        "required": ["operations"],
+    }
+
+
 def to_patch(parsed) -> list[dict]:
     if not (isinstance(parsed, dict) and isinstance(parsed.get("operations"), list)):
         raise jsonpatch.InvalidJsonPatch('Expected {"operations": [...]}')
-    return [check_op(op) for op in parsed["operations"]]
+    ops = []
+    for op in parsed["operations"]:
+        if isinstance(op, dict) and "key" in op:
+            # {"op": "add", "path": <envs>, "key": NAME} → {"op": "add", "path": <envs>/NAME}
+            op = dict(op)
+            op["path"] = f"{op.get('path')}/{escape(str(op.pop('key')))}"
+        ops.append(check_op(op))
+    return ops
 
 
 def describe(patch: list[dict], values: dict) -> list[dict]:
@@ -338,12 +381,9 @@ async def process_message(req: EditRequest):
     values = await fetch_json(f"{config.values_url}/{app_name}")
 
     # Stage 2: Modify configuration
-    # minified JSON is ~3x fewer tokens than indent=2, which keeps big schemas inside num_ctx
-    prompt = MODIFY_CONFIG_USER.format(
-        input=user_input,
-        schema=json.dumps(schema, separators=(",", ":")),
-        values=json.dumps(values, separators=(",", ":")),
-    )
+    # The schema isn't sent: the path enum in patch_format() plus local validation do its job,
+    # which cuts the prompt from ~5k to ~1k tokens (benchmarked: same or better accuracy).
+    prompt = MODIFY_CONFIG_USER.format(input=user_input, values=json.dumps(values, separators=(",", ":")))
     key = cache_key(user_input, app_name, values, schema)
     feedback = ""
     for attempt in range(config.max_retries):
@@ -352,7 +392,7 @@ async def process_message(req: EditRequest):
                 PATCH_CACHE.move_to_end(key)
                 patch = PATCH_CACHE[key]
             else:
-                response = await call_llm(MODIFY_CONFIG_SYSTEM, prompt + feedback, PATCH_FORMAT, 2048)
+                response = await call_llm(MODIFY_CONFIG_SYSTEM, prompt + feedback, patch_format(values), 256)
                 patch = to_patch(json.loads(response, parse_constant=reject_constant))
             result = jsonpatch.apply_patch(values, patch)
             validate(instance=result, schema=schema)

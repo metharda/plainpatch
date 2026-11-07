@@ -18,7 +18,8 @@ MODIFY_CONFIG_SYSTEM = """You modify JSON configurations by returning a JSON Pat
 
 Rules:
 - Return a JSON object {"operations": [...]} where each operation is {"op", "path", "value"}
-- "replace" changes an existing field, "add" creates a new one (e.g. a new env var), "remove" deletes one
+- "replace" changes an existing field, "remove" deletes one
+- To add a new env var use {"op": "add", "path": "<the envs path>", "key": "<VAR_NAME>", "value": "<value>"}; to change an existing one use "replace" on its path
 - Paths are JSON Pointers into the current config
 - Only change what the user asks for
 - Memory is in MiB (1024mb = 1024)
@@ -33,10 +34,7 @@ Example:
 {"operations": [{"op": "replace", "path": "/workload/container/resources/memory/limitMiB", "value": 1024}]}"""
 
 # static parts first, request last: Ollama reuses the cached prompt prefix across requests
-MODIFY_CONFIG_USER = """JSON Schema:
-{schema}
-
-Current config:
+MODIFY_CONFIG_USER = """Current config:
 {values}
 
 User request: "{input}"

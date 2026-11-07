@@ -13,15 +13,18 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app import (
+    APP_FORMAT,
     PATCH_CACHE,
-    PATCH_FORMAT,
     CircuitBreaker,
     app,
     circuit_breaker,
     config,
     describe,
+    editable_paths,
     exponential_backoff,
+    patch_format,
     route_app,
+    to_patch,
 )
 from prompts import MODIFY_CONFIG_USER
 
@@ -530,7 +533,7 @@ class TestRoutingAndCache:
     @patch("app.call_llm")
     def test_named_app_skips_the_classifier(self, mock_llm, mock_fetch, client):
         async def _side_effect(system, user, fmt, num_predict):
-            assert fmt is PATCH_FORMAT, "classifier should not be called"
+            assert fmt is not APP_FORMAT, "classifier should not be called"
             return PATCH_REPLY
 
         mock_llm.side_effect = _side_effect
@@ -573,5 +576,48 @@ class TestRoutingAndCache:
         assert mock_llm.call_count == 2
 
     def test_request_comes_after_the_static_prompt(self):
-        prompt = MODIFY_CONFIG_USER.format(input="REQ", schema="SCHEMA", values="VALUES")
-        assert prompt.index("SCHEMA") < prompt.index("VALUES") < prompt.index("REQ")
+        prompt = MODIFY_CONFIG_USER.format(input="REQ", values="VALUES")
+        assert prompt.index("VALUES") < prompt.index("REQ")
+
+
+class TestPathConstrainedPatches:
+    VALUES = {
+        "replicas": 2,
+        "envs": {"TENANT": "x"},
+        "empty": {},
+        "labels": {"app.io/name": "storefront"},
+        "ports": [{"port": 80}],
+    }
+
+    def test_editable_paths(self):
+        assert editable_paths(self.VALUES) == [
+            "/replicas", "/envs", "/envs/TENANT", "/labels/app.io~1name", "/ports/0/port",
+        ]  # "/empty" left out: replacing an empty object invites made-up subtrees
+
+    def test_patch_format_only_allows_existing_paths(self):
+        edit, add_key = patch_format(self.VALUES)["properties"]["operations"]["items"]["anyOf"]
+        assert "/envs" not in edit["properties"]["path"]["enum"]
+        assert add_key["properties"]["path"]["enum"] == ["/envs"]
+        assert add_key["required"] == ["op", "path", "key", "value"]
+        assert "anyOf" in edit["properties"]["value"]  # scalars only
+
+    def test_add_key_becomes_a_normal_add(self):
+        patch = to_patch({"operations": [{"op": "add", "path": "/envs", "key": "LOG/LEVEL", "value": "debug"}]})
+        assert patch == [{"op": "add", "path": "/envs/LOG~1LEVEL", "value": "debug"}]
+
+    @respx.mock
+    @patch("app.fetch_json")
+    def test_aborted_prediction_is_retried_with_feedback(self, mock_fetch, client):
+        replies = iter([
+            httpx.Response(500, json={"error": "prediction aborted, token repeat limit reached"}),
+            httpx.Response(200, json={"message": {"content": PATCH_REPLY}, "done_reason": "stop"}),
+        ])
+        route = respx.post(f"{config.ollama_url}/api/chat").mock(side_effect=lambda request: next(replies))
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
+
+        resp = client.post("/edits", json={"text": "set ledger memory to 1024mb"})
+
+        assert resp.status_code == 200
+        retry_prompt = json.loads(route.calls[1].request.content)["messages"][1]["content"]
+        assert "token repeat limit reached" in retry_prompt
+        assert circuit_breaker.state == "closed"
