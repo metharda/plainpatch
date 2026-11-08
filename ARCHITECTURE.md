@@ -26,7 +26,7 @@ System: Returns updated JSON configuration validated against schema
 ┌──────────────────────────────────▼───────────────────────────────┐
 │                      BOT SERVICE (:7000)                         │
 │  ┌────────────────────────────────────────────────────────────┐  │
-│  │ Stage 1: Extract app name via LLM                          │  │
+│  │ Stage 1: App name (regex router, LLM only as fallback)     │  │
 │  │   Input: user message                                      │  │
 │  │   Output: "ledger"                                     │  │
 │  └────────────────────────────────────────────────────────────┘  │
@@ -88,7 +88,7 @@ Stage 1: App Identification
 - Clear separation of concerns
 
 Stage 2: Configuration Modification
-- Full context with schema and values
+- Context: the current config plus a grammar listing its valid paths (the schema stays local for validation)
 - Focused on specific application
 - LLM answers with a **JSON Patch** (RFC 6902), not the whole config
 - Patch is applied, then schema-validated before returning
@@ -98,33 +98,53 @@ Stage 2: Configuration Modification
 - A patch is a few lines: faster to generate, and nothing outside the patch can change by accident
 - The patch doubles as a human-readable diff (`changes` in the response) and as the audit-log entry
 
-### 3. Structured Outputs and the Context Window
-
-Both LLM calls use Ollama's **structured outputs**: the `format` field carries a JSON Schema, which Ollama compiles into a grammar, so the model can only produce tokens that form matching JSON.
-
-| Call | `format` | Effect |
-|------|----------|--------|
-| Pick the app | `{"app": enum[storefront, ledger, orders, none]}` | Always one valid answer, so there's no free-text parsing and no blind retries. `none` keeps unrelated requests from being forced onto an app |
-| Edit the config | `{"operations": [{op: enum, path, value?, from?}]}` | No prose or code fences to strip. The array is wrapped in an object because top-level array schemas are less reliable |
-
-Grammar constraints guarantee the *shape* of the JSON, not that it's *correct*, so the bot still checks per-op rules (e.g. `replace` needs a `value`), applies the patch (paths must exist), and validates the result against the app's schema.
-
-Other settings sent with every call:
-- **`temperature: 0`**, following Ollama's guidance for structured outputs. Because sampling is deterministic, a retry with the same prompt would repeat the same mistake, so **each retry appends the previous error** (bad path, schema violation) to the prompt.
-- **`num_ctx` (default 16384, `--num-ctx` / `LLM_NUM_CTX`).** On machines with less than 24 GiB VRAM, Ollama defaults to a 4k context and silently drops the *start* of longer prompts. The same value goes on both calls, because a different `num_ctx` makes Ollama reload the model.
-- **Minified schema/config in the prompt.** The largest schema (orders) is about 5k tokens with `indent=2` and about 2.5k minified.
-- **`done_reason == "length"`** (the reply hit `num_predict`) counts as a failed attempt and is retried. A `prompt_eval_count` near `num_ctx` logs a truncation warning.
-- **`keep_alive: 30m`** keeps the model loaded between requests.
-
 **Benefits:**
 - Reduced token usage per request
 - Better accuracy through focused context
 - Easier debugging (know exactly where failures occur)
 - Retry logic can target specific stage
 
-**Trade-off:** Added latency (~1-2s extra) for improved reliability.
+**Trade-off:** Added latency for the classification call. In practice it's usually skipped (see below).
 
-### 4. Technology Stack Choices
+### 3. Structured Outputs, Path Constraints and the Context Window
+
+Both LLM calls use Ollama's **structured outputs**: the `format` field carries a JSON Schema, which Ollama compiles into a grammar, so the model can only produce tokens that form matching JSON.
+
+| Call | `format` | Effect |
+|------|----------|--------|
+| Pick the app | `{"app": enum[storefront, ledger, orders, none]}` | Always one valid answer, with no free-text parsing and no blind retries. **Skipped entirely** when the request names exactly one app (a word-boundary match) |
+| Edit the config | Built per config by `patch_format()`: `{"operations": [edit \| add_key]}` | `edit` = `{op: replace\|remove, path: enum(every existing leaf), value: string\|number\|boolean}`. `add_key` = `{op: "add", path: enum(env maps), key, value}`, all required. **The model can only name paths that exist** |
+
+Why the edit grammar looks like this (each point was measured; see the benchmark below):
+- **A path enum instead of a free-text `path`.** Without it, the model invented pointers (e.g. dropping `containers/<app>` from the path), and retries couldn't fix that.
+- **Scalar values only.** An open "any JSON" `value` let the model paste whole subtrees, or loop until Ollama aborted with `token repeat limit reached`.
+- **Empty objects aren't valid targets** unless they're maps such as `envs`. Otherwise the model "replaces" e.g. an empty `/workload/deployments` with a made-up object.
+- **New map keys get their own op shape with `key` required.** When `key` was optional, the model left it out and overwrote the whole `envs` object.
+
+**The app schema is not sent to the model.** The path enum plus local validation do its job, which cuts the edit prompt from about 2,500 to about 600 tokens with the same or better accuracy. Grammar constraints guarantee the *shape* of the output, not that it's *correct*, so the bot still checks per-op rules, applies the patch, and validates the result against the full schema.
+
+Other settings sent with every call:
+- **`temperature: 0`**, following Ollama's guidance. Because sampling is deterministic, a retry with the same prompt would repeat the same mistake, so **each retry appends the previous error** to the prompt. Ollama's `prediction aborted` errors count as a bad answer and are retried with feedback, not treated as an outage.
+- **Request last in the prompt.** Static instructions and config come first, so Ollama's automatic prompt cache reuses the prefix. In the benchmark, about 930 of about 950 prompt tokens were served from the cache.
+- **`num_ctx` (default 16384, `--num-ctx` / `LLM_NUM_CTX`).** On machines with less than 24 GiB VRAM, Ollama defaults to a 4k context and silently drops the *start* of longer prompts. The same value goes on every call, because a different `num_ctx` makes Ollama reload the model.
+- **`num_predict: 256`** for edits. `done_reason == "length"` counts as a failed attempt. Every call logs prompt, cached and generated token counts and load time.
+- **Exact-match cache.** A repeat of the same request (normalized) against the same config and schema reuses the validated patch with no LLM call.
+
+### 4. Benchmark (qwen2.5:3b, RTX 4070, Ollama 0.40.17)
+
+There are 30 labeled requests, scored on whether the config after applying the patch equals the expected config exactly. Design choices were tuned on these. There are also 18 **held-out** requests written afterwards to check that the gains generalize.
+
+| Version | Tuned set | Held-out | Median / max latency | Edit prompt | LLM calls/request |
+|---|---|---|---|---|---|
+| Free-text paths, full schema in prompt | 20/30 | 8/18 | 0.49 s / 1.6 s | ~2,560 tokens | 2.1 |
+| + router, request-last prompt, exact cache | 21/30 | 17/18 | 0.35 s / 19.9 s* | ~2,600 | 1.4 |
+| + path enum, scalar values, typed `add_key`, no schema (current) | **26/30** | **15/18** | **0.38 s / 5.2 s** | **~600** | **1.2** |
+
+\* one reply ran on to the 2,048-token cap before it was rejected; every other request finished in under 2.1 s.
+
+The remaining misses are arithmetic or unit slips (`50%` of 500 → 750, `5gb` → 5242) and ingress proxy settings mistaken for probe settings (connect, read and send timeouts). Adding prompt rules for these made results worse, so the next step is moving unit and percentage math into Python (slot filling) instead of asking the model.
+
+### 5. Technology Stack Choices
 
 | Component | Choice | Reasoning |
 |-----------|--------|-----------|
@@ -177,9 +197,8 @@ Bot Service ──HTTP POST──> Ollama (/api/chat)
    ```
 
 2. **Stage 1 - App extraction**
-   - Bot sends prompt to LLM: "Extract app name from: ..."
-   - LLM responds: "ledger"
-   - Bot validates: ledger ∈ [storefront, ledger, orders] ✓
+   - The request names exactly one app ("ledger"), so the regex router picks it with no LLM call
+   - Otherwise the LLM answers `{"app": ...}` constrained to [storefront, ledger, orders, none]
 
 3. **Fetch schema and values**
    - GET http://schema-server:7001/ledger → JSON Schema
@@ -188,7 +207,7 @@ Bot Service ──HTTP POST──> Ollama (/api/chat)
 4. **Stage 2 - Config modification**
    - Bot sends to LLM:
      - Original user message
-     - JSON Schema (structure rules)
+     - Grammar (`format`) listing every existing path, plus a typed op for adding env vars
      - Current values (to modify)
    - LLM returns JSON Patch ops
 
@@ -434,7 +453,7 @@ ai-config-tool/
 │   ├── requirements.txt
 │   ├── pytest.ini
 │   └── tests/
-│       └── test_app.py           # 44 unit tests
+│       └── test_app.py           # 57 unit tests
 │
 ├── schema-server/                # Schema service (port 7001)
 │   ├── app.py                    # FastAPI app serving JSON schemas
