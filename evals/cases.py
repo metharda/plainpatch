@@ -4,6 +4,7 @@ C = M = T = "/workload/container"  # every app uses the same layout
 REMOVE = object()
 
 # (request, expected app or None when the request must be refused, {pointer: expected new value | REMOVE})
+# The design was iterated on TUNED; HELDOUT was written later to check that it generalizes.
 TUNED = [
     ("set ledger service memory to 1024mb", "ledger", {f"{T}/resources/memory/limitMiB": 1024}),
     ("set TENANT env to globex for orders service", "orders", {f"{M}/envs/TENANT": "globex"}),
@@ -40,4 +41,28 @@ TUNED = [
     ("make the printer faster", None, {}),
 ]
 
-SETS = {"tuned": TUNED}
+# written after tuning on TUNED
+HELDOUT = [
+    ("bump storefront replicas to 4", "storefront", {"/workload/replicas": 4}),
+    ("set storefront memory request to 768mb", "storefront", {f"{C}/resources/memory/requestMiB": 768}),
+    ("change the orders image tag to orders:1.3.0", "orders", {f"{M}/image": "orders:1.3.0"}),
+    ("set FEATURE_FLAGS env to beta on storefront", "storefront", {f"{C}/envs/FEATURE_FLAGS": "beta"}),
+    ("update TENANT on orders to initech", "orders", {f"{M}/envs/TENANT": "initech"}),
+    ("set connect timeout of orders ingress to 30 seconds", "orders",
+     {"/ingress/proxy/timeouts/connectSeconds": 30}),
+    ("set ledger cpu request to 1500 millicores", "ledger", {f"{T}/resources/cpu/requestMilliCPU": 1500}),
+    ("increase ledger memory limit to 5gb", "ledger", {f"{T}/resources/memory/limitMiB": 5120}),
+    ("set storefront readiness probe port to 8080", "storefront", {f"{C}/probes/readiness/port": 8080}),
+    ("set orders replicas to 1", "orders", {"/workload/replicas": 1}),
+    ("set send timeout for orders proxy to 90s", "orders",
+     {"/ingress/proxy/timeouts/sendSeconds": 90}),
+    ("set storefront max connection count to 25", "storefront", {"/workload/maxConnections": 25}),
+    ("set storefront imagePullPolicy to Always", "storefront", {f"{C}/imagePullPolicy": "Always"}),
+    ("set the ledger memory request to 2gb", "ledger", {f"{T}/resources/memory/requestMiB": 2048}),
+    ("add env DEBUG=true to orders", "orders", {f"{M}/envs/DEBUG": "true"}),
+    ("reduce storefront cpu request to 500 millicores", "storefront", {f"{C}/resources/cpu/requestMilliCPU": 500}),
+    ("set ledger replicas to 4", "ledger", {"/workload/replicas": 4}),
+    ("turn the oven on", None, {}),
+]
+
+SETS = {"tuned": TUNED, "heldout": HELDOUT}
