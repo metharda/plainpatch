@@ -4,7 +4,7 @@ C = M = T = "/workload/container"  # every app uses the same layout
 REMOVE = object()
 
 # (request, expected app or None when the request must be refused, {pointer: expected new value | REMOVE})
-# The design was iterated on TUNED; HELDOUT was written later to check that it generalizes.
+# The design was iterated on TUNED; HELDOUT and HELDOUT2 were written later to check that it generalizes.
 TUNED = [
     ("set ledger service memory to 1024mb", "ledger", {f"{T}/resources/memory/limitMiB": 1024}),
     ("set TENANT env to globex for orders service", "orders", {f"{M}/envs/TENANT": "globex"}),
@@ -65,4 +65,34 @@ HELDOUT = [
     ("turn the oven on", None, {}),
 ]
 
-SETS = {"tuned": TUNED, "heldout": HELDOUT}
+# written before the quantity-string design existed and not looked at until it was finished
+HELDOUT2 = [
+    ("storefront needs 3gb of memory", "storefront", {f"{C}/resources/memory/limitMiB": 3072}),
+    ("cut the ledger memory limit by 1gb", "ledger", {f"{T}/resources/memory/limitMiB": 3072}),
+    ("increase storefront cpu limit by 25%", "storefront", {f"{C}/resources/cpu/limitMilliCPU": 1875}),
+    ("set orders cpu limit to one and a half cores", "orders", {f"{M}/resources/cpu/limitMilliCPU": 1500}),
+    ("set storefront memory request to 0.5gb", "storefront", {f"{C}/resources/memory/requestMiB": 512}),
+    ("reduce ledger replicas by 1", "ledger", {"/workload/replicas": 1}),
+    ("set the orders read and send timeouts to 45 seconds", "orders",
+     {"/ingress/proxy/timeouts/readSeconds": 45,
+      "/ingress/proxy/timeouts/sendSeconds": 45}),
+    ("set ledger cpu request to 2 cores and limit to 3 cores", "ledger",
+     {f"{T}/resources/cpu/requestMilliCPU": 2000, f"{T}/resources/cpu/limitMilliCPU": 3000}),
+    ("set storefront image to registry.example.com/storefront:2.0.0", "storefront", {f"{C}/image": "registry.example.com/storefront:2.0.0"}),
+    ("set TENANT for orders to umbrella", "orders", {f"{M}/envs/TENANT": "umbrella"}),
+    ("add an env var TZ with value UTC to ledger", "ledger", {f"{T}/envs/TZ": "UTC"}),
+    ("set orders memory limit to 1.5gb", "orders", {f"{M}/resources/memory/limitMiB": 1536}),
+    ("lower ledger memory request to 75%", "ledger", {f"{T}/resources/memory/requestMiB": 3072}),
+    ("set orders http service port to 12000", "orders", {"/service/port": 12000}),
+    ("set storefront liveness, readiness and startup probe ports to 7000", "storefront",
+     {f"{C}/probes/liveness/port": 7000, f"{C}/probes/readiness/port": 7000, f"{C}/probes/startup/port": 7000}),
+    ("set orders body size to 8", "orders", {"/ingress/proxy/bodySize": 8}),
+    ("make storefront pull its image always", "storefront", {f"{C}/imagePullPolicy": "Always"}),
+    ("set storefront maxConnections to 100 and replicas to 3", "storefront",
+     {"/workload/maxConnections": 100, "/workload/replicas": 3}),
+    ("what's the weather in Paris", None, {}),
+    ("set ledger memory to 2048", "ledger", {f"{T}/resources/memory/limitMiB": 2048}),
+    ("set storefront cpu limit to 750m", "storefront", {f"{C}/resources/cpu/limitMilliCPU": 750}),
+]
+
+SETS = {"tuned": TUNED, "heldout": HELDOUT, "heldout2": HELDOUT2}
