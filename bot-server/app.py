@@ -23,6 +23,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from pythonjsonlogger.json import JsonFormatter
 
+from intents import IntentError, compile_intents, intent_format
 from prompts import (
     APPS,
     EXTRACT_APP_SYSTEM,
@@ -122,7 +123,7 @@ class TruncatedOutputError(ValueError):
 
 # Structured outputs: Ollama compiles these JSON Schemas into a grammar, so the model
 # can only emit tokens that produce matching JSON (no prose, no code fences).
-# The edit call's schema is built per config by patch_format().
+# The edit call's schema is built per config by intents.intent_format().
 APP_FORMAT = {
     "type": "object",
     "properties": {"app": {"type": "string", "enum": [*APPS, "none"]}},
@@ -228,85 +229,6 @@ def reject_constant(name: str):
     raise ValueError(f"{name} is not valid JSON")
 
 
-PATCH_OPS = {"add", "remove", "replace", "move", "copy", "test"}
-
-
-def check_op(op) -> dict:
-    if not (isinstance(op, dict) and op.get("op") in PATCH_OPS and isinstance(op.get("path"), str)):
-        raise jsonpatch.InvalidJsonPatch(f"Invalid patch operation: {op!r}")
-    if op["op"] in ("move", "copy") and not isinstance(op.get("from"), str):
-        raise jsonpatch.InvalidJsonPatch(f"'{op['op']}' needs a string 'from': {op!r}")
-    if op["op"] in ("add", "replace", "test") and "value" not in op:
-        raise jsonpatch.InvalidJsonPatch(f"'{op['op']}' needs a 'value': {op!r}")
-    return op
-
-
-MAP_CONTAINERS = ("envs",)  # objects where "add" may create new keys
-
-
-def escape(key: str) -> str:
-    return key.replace("~", "~0").replace("/", "~1")
-
-
-def editable_paths(values: dict) -> list[str]:
-    """Every leaf pointer in the config, plus map containers that accept new keys."""
-    paths = []
-
-    def walk(node, path):
-        if path.rsplit("/", 1)[-1] in MAP_CONTAINERS:
-            paths.append(path)
-        if isinstance(node, dict) and node:
-            for k, v in node.items():
-                walk(v, f"{path}/{escape(k)}")
-        elif isinstance(node, list) and node:
-            for i, v in enumerate(node):
-                walk(v, f"{path}/{i}")
-        elif path not in paths and node != {}:  # empty objects only count as maps (MAP_CONTAINERS)
-            paths.append(path)
-
-    walk(values, "")
-    return paths
-
-
-def patch_format(values: dict) -> dict:
-    # the grammar only allows paths that exist, so the model can't invent pointers
-    paths = editable_paths(values)
-    leaves = [p for p in paths if p.rsplit("/", 1)[-1] not in MAP_CONTAINERS]
-    maps = [p for p in paths if p.rsplit("/", 1)[-1] in MAP_CONTAINERS]
-    scalar = {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}
-    edit = {
-        "type": "object",
-        "properties": {"op": {"type": "string", "enum": ["replace", "remove"]},
-                       "path": {"type": "string", "enum": leaves}, "value": scalar},
-        "required": ["op", "path"],
-    }
-    # adding a map entry is its own shape with "key" required, or the model skips it
-    add_key = {
-        "type": "object",
-        "properties": {"op": {"type": "string", "enum": ["add"]}, "path": {"type": "string", "enum": maps},
-                       "key": {"type": "string"}, "value": {"type": "string"}},
-        "required": ["op", "path", "key", "value"],
-    }
-    return {
-        "type": "object",
-        "properties": {"operations": {"type": "array", "items": {"anyOf": [edit, add_key] if maps else [edit]}}},
-        "required": ["operations"],
-    }
-
-
-def to_patch(parsed) -> list[dict]:
-    if not (isinstance(parsed, dict) and isinstance(parsed.get("operations"), list)):
-        raise jsonpatch.InvalidJsonPatch('Expected {"operations": [...]}')
-    ops = []
-    for op in parsed["operations"]:
-        if isinstance(op, dict) and "key" in op:
-            # {"op": "add", "path": <envs>, "key": NAME} → {"op": "add", "path": <envs>/NAME}
-            op = dict(op)
-            op["path"] = f"{op.get('path')}/{escape(str(op.pop('key')))}"
-        ops.append(check_op(op))
-    return ops
-
-
 def describe(patch: list[dict], values: dict) -> list[dict]:
     return [
         {
@@ -328,7 +250,7 @@ def route_app(text: str) -> str | None:
 
 # exact-match cache: same request against the same config → same patch, no LLM call
 # ponytail: in-process LRU, lost on restart and not shared between replicas
-PATCH_CACHE: OrderedDict[str, list[dict]] = OrderedDict()
+PATCH_CACHE: OrderedDict[str, tuple[list[dict], list[dict]]] = OrderedDict()  # key -> (intents, patch)
 PATCH_CACHE_SIZE = 256
 
 
@@ -390,16 +312,21 @@ async def process_message(req: EditRequest):
         try:
             if key in PATCH_CACHE:
                 PATCH_CACHE.move_to_end(key)
-                patch = PATCH_CACHE[key]
+                intents, patch = PATCH_CACHE[key]
             else:
-                response = await call_llm(MODIFY_CONFIG_SYSTEM, prompt + feedback, patch_format(values), 256)
-                patch = to_patch(json.loads(response, parse_constant=reject_constant))
+                response = await call_llm(MODIFY_CONFIG_SYSTEM, prompt + feedback, intent_format(values), 256)
+                parsed = json.loads(response, parse_constant=reject_constant)
+                intents = parsed.get("operations") if isinstance(parsed, dict) else None
+                # the model said *what* to change; units, percentages and pointers are resolved in code
+                patch = compile_intents(intents, values)
             result = jsonpatch.apply_patch(values, patch)
             validate(instance=result, schema=schema)
-            PATCH_CACHE[key] = patch
+            PATCH_CACHE[key] = (intents, patch)
             if len(PATCH_CACHE) > PATCH_CACHE_SIZE:
                 PATCH_CACHE.popitem(last=False)
             break
+        except IntentError as e:
+            error = f"invalid operation: {e}"
         except ValueError as e:  # includes json.JSONDecodeError and TruncatedOutputError
             error = f"invalid JSON: {e}"
         except (jsonpatch.JsonPatchException, jsonpointer.JsonPointerException) as e:
@@ -418,6 +345,7 @@ async def process_message(req: EditRequest):
         "applied": False,
         "revision": None,
         "changes": describe(patch, values),
+        "intent": intents,  # what the model asked for, before code resolved units and arithmetic
         "patch": patch,
         "config": result,
     }

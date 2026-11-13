@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && useradd -r -u 1000 appuser
 WORKDIR /app
 COPY --from=builder /build/deps /usr/local/lib/python3.12/site-packages
-COPY prompts.py app.py ./
+COPY prompts.py intents.py app.py ./
 USER appuser
 EXPOSE 7000
 CMD ["python", "app.py", "--listen=0.0.0.0:7000"]

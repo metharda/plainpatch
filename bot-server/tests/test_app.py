@@ -20,11 +20,8 @@ from app import (
     circuit_breaker,
     config,
     describe,
-    editable_paths,
     exponential_backoff,
-    patch_format,
     route_app,
-    to_patch,
 )
 from prompts import MODIFY_CONFIG_USER
 
@@ -580,31 +577,7 @@ class TestRoutingAndCache:
         assert prompt.index("VALUES") < prompt.index("REQ")
 
 
-class TestPathConstrainedPatches:
-    VALUES = {
-        "replicas": 2,
-        "envs": {"TENANT": "x"},
-        "empty": {},
-        "labels": {"app.io/name": "storefront"},
-        "ports": [{"port": 80}],
-    }
-
-    def test_editable_paths(self):
-        assert editable_paths(self.VALUES) == [
-            "/replicas", "/envs", "/envs/TENANT", "/labels/app.io~1name", "/ports/0/port",
-        ]  # "/empty" left out: replacing an empty object invites made-up subtrees
-
-    def test_patch_format_only_allows_existing_paths(self):
-        edit, add_key = patch_format(self.VALUES)["properties"]["operations"]["items"]["anyOf"]
-        assert "/envs" not in edit["properties"]["path"]["enum"]
-        assert add_key["properties"]["path"]["enum"] == ["/envs"]
-        assert add_key["required"] == ["op", "path", "key", "value"]
-        assert "anyOf" in edit["properties"]["value"]  # scalars only
-
-    def test_add_key_becomes_a_normal_add(self):
-        patch = to_patch({"operations": [{"op": "add", "path": "/envs", "key": "LOG/LEVEL", "value": "debug"}]})
-        assert patch == [{"op": "add", "path": "/envs/LOG~1LEVEL", "value": "debug"}]
-
+class TestOllamaAborts:
     @respx.mock
     @patch("app.fetch_json")
     def test_aborted_prediction_is_retried_with_feedback(self, mock_fetch, client):

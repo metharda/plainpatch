@@ -14,24 +14,23 @@ EXTRACT_APP_USER = """Request: "{input}"
 
 App name:"""
 
-MODIFY_CONFIG_SYSTEM = """You modify JSON configurations by returning a JSON Patch (RFC 6902).
+MODIFY_CONFIG_SYSTEM = """You turn a configuration change request into JSON Patch style operations. Code applies them.
+
+Return {"operations": [...]} using:
+- Change an existing field: {"op": "replace", "path": P, "value": V}
+  For memory, CPU and time fields, and for relative changes, write the quantity as a string exactly as
+  the user said it. Do NOT convert units or do arithmetic; code does that.
+  "to 2gb" -> "2gb" | "750m" -> "750m" | "1.5 cores" -> "1.5 cores" | "90 seconds" -> "90s"
+  "to 80%" -> "80%" | "by 512mb" -> "+512mb" | "down by 1" -> "-1" | "double" -> "200%" | "halve" -> "50%"
+- A new env var: {"op": "add", "path": "<the envs path>", "key": "NAME", "value": "text"}
+- Delete a field: {"op": "remove", "path": P}
 
 Rules:
-- Return a JSON object {"operations": [...]} where each operation is {"op", "path", "value"}
-- "replace" changes an existing field, "remove" deletes one
-- To add a new env var use {"op": "add", "path": "<the envs path>", "key": "<VAR_NAME>", "value": "<value>"}; to change an existing one use "replace" on its path
-- Paths are JSON Pointers into the current config
 - Only change what the user asks for
-- Memory is in MiB (1024mb = 1024)
-- CPU is in milliCPU (80% of 1500 = 1200)
+- Paths are JSON Pointers into the current config
 
-Key paths:
-- Memory: /workload/container/resources/memory/limitMiB
-- CPU: /workload/container/resources/cpu/limitMilliCPU
-- Env vars: /workload/container/envs/[VAR_NAME]
-
-Example:
-{"operations": [{"op": "replace", "path": "/workload/container/resources/memory/limitMiB", "value": 1024}]}"""
+Example: "set storefront memory to 2gb" ->
+{"operations": [{"op": "replace", "path": "/workload/container/resources/memory/limitMiB", "value": "2gb"}]}"""
 
 # static parts first, request last: Ollama reuses the cached prompt prefix across requests
 MODIFY_CONFIG_USER = """Current config:
@@ -44,4 +43,4 @@ Return the JSON Patch:"""
 RETRY_FEEDBACK = """
 
 Your previous answer was rejected: {error}
-Return a corrected JSON Patch."""
+Return corrected operations."""

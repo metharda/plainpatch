@@ -24,7 +24,7 @@ select = [
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["app", "prompts", "configbot"]
+known-first-party = ["app", "prompts", "intents", "configbot"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
