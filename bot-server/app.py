@@ -19,6 +19,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from jsonschema import ValidationError, validate
+from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from pythonjsonlogger.json import JsonFormatter
@@ -106,15 +107,40 @@ class EditRequest(BaseModel):
     author: str = "anonymous"
 
 
+async def warm_up():
+    """Load the model with the same num_ctx as real calls, so the first request doesn't pay for it."""
+    try:
+        async with httpx.AsyncClient(timeout=config.timeout) as client:
+            resp = await client.post(f"{config.ollama_url}/api/generate", json={
+                "model": config.model, "keep_alive": config.keep_alive, "options": {"num_ctx": config.num_ctx},
+            })
+            resp.raise_for_status()
+        log.info("Model warmed up", extra={"model": config.model})
+    except httpx.HTTPError as e:
+        log.warning("Model warm-up failed; the first request will load it", extra={"error": str(e)})
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Starting bot-server")
+    warm = asyncio.create_task(warm_up())
     yield
+    warm.cancel()
     log.info("Shutting down bot-server gracefully")
 
 
 app = FastAPI(title="Bot Service", version="1.0.0", lifespan=lifespan)
 Instrumentator().instrument(app).expose(app)
+
+
+# LLM-specific metrics, next to the HTTP metrics from the instrumentator
+LLM_CALLS = Counter("llm_calls_total", "LLM calls", ["stage"])
+LLM_SECONDS = Histogram("llm_call_seconds", "LLM call latency", ["stage"], buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 30))
+LLM_TOKENS = Counter("llm_tokens_total", "Tokens processed by the LLM", ["kind"])  # prompt / cached / generated
+APP_ROUTING = Counter("app_routing_total", "How the target app was chosen", ["method"])  # regex / llm
+PATCH_CACHE_LOOKUPS = Counter("patch_cache_lookups_total", "Exact-match patch cache lookups", ["result"])
+EDIT_ATTEMPTS = Histogram("edit_attempts", "LLM attempts needed per accepted edit", buckets=(1, 2, 3))
+EDIT_REJECTIONS = Counter("edit_rejections_total", "Rejected LLM edits", ["reason"])
 
 
 class TruncatedOutputError(ValueError):
@@ -139,6 +165,9 @@ def exponential_backoff(attempt: int) -> float:
 async def call_llm(system: str, user: str, fmt: dict, num_predict: int) -> str:
     if not circuit_breaker.can_execute():
         raise HTTPException(503, "Service temporarily unavailable (circuit open)")
+    stage = "app" if fmt is APP_FORMAT else "edit"
+    LLM_CALLS.labels(stage).inc()
+    started = time.perf_counter()
 
     for attempt in range(config.max_retries):
         try:
@@ -190,6 +219,10 @@ async def call_llm(system: str, user: str, fmt: dict, num_predict: int) -> str:
         log.warning("Prompt may have been truncated, raise --num-ctx", extra={
             "prompt_eval_count": data.get("prompt_eval_count"), "num_ctx": config.num_ctx,
         })
+    LLM_SECONDS.labels(stage).observe(time.perf_counter() - started)
+    LLM_TOKENS.labels("prompt").inc(data.get("prompt_eval_count") or 0)
+    LLM_TOKENS.labels("cached").inc(data.get("prompt_eval_cached_count") or 0)
+    LLM_TOKENS.labels("generated").inc(data.get("eval_count") or 0)
     log.info("LLM call", extra={
         "prompt_tokens": data.get("prompt_eval_count"),
         "cached_tokens": data.get("prompt_eval_cached_count"),  # prefix reused from Ollama's prompt cache
@@ -285,6 +318,7 @@ async def process_message(req: EditRequest):
 
     # Stage 1: Extract app name; the LLM is only asked when the request doesn't name exactly one app
     app_name = route_app(user_input)
+    APP_ROUTING.labels("regex" if app_name else "llm").inc()
     if app_name is None:
         # the enum in APP_FORMAT means no free-text parsing or retries
         response = await call_llm(EXTRACT_APP_SYSTEM, EXTRACT_APP_USER.format(input=user_input), APP_FORMAT, 32)
@@ -312,8 +346,10 @@ async def process_message(req: EditRequest):
         try:
             if key in PATCH_CACHE:
                 PATCH_CACHE.move_to_end(key)
+                PATCH_CACHE_LOOKUPS.labels("hit").inc()
                 intents, patch = PATCH_CACHE[key]
             else:
+                PATCH_CACHE_LOOKUPS.labels("miss").inc()
                 response = await call_llm(MODIFY_CONFIG_SYSTEM, prompt + feedback, intent_format(values), 256)
                 parsed = json.loads(response, parse_constant=reject_constant)
                 intents = parsed.get("operations") if isinstance(parsed, dict) else None
@@ -324,15 +360,18 @@ async def process_message(req: EditRequest):
             PATCH_CACHE[key] = (intents, patch)
             if len(PATCH_CACHE) > PATCH_CACHE_SIZE:
                 PATCH_CACHE.popitem(last=False)
+            EDIT_ATTEMPTS.observe(attempt + 1)
             break
         except IntentError as e:
-            error = f"invalid operation: {e}"
+            reason, error = "invalid_operation", f"invalid operation: {e}"
         except ValueError as e:  # includes json.JSONDecodeError and TruncatedOutputError
-            error = f"invalid JSON: {e}"
+            reason, error = "invalid_json", f"invalid JSON: {e}"
         except (jsonpatch.JsonPatchException, jsonpointer.JsonPointerException) as e:
-            error = f"patch could not be applied: {e}"
+            reason, error = "bad_patch", f"patch could not be applied: {e}"
         except ValidationError as e:
-            error = f"result violates the schema at /{'/'.join(map(str, e.absolute_path))}: {e.message}"
+            reason, error = "schema", f"result violates the schema at /{'/'.join(map(str, e.absolute_path))}: {e.message}"
+
+        EDIT_REJECTIONS.labels(reason).inc()
 
         log.warning("Rejected LLM output", extra={"error": error, "attempt": attempt + 1})
         # temperature is 0, so retrying the same prompt would reproduce the same mistake

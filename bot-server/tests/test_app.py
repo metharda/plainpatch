@@ -594,3 +594,31 @@ class TestOllamaAborts:
         retry_prompt = json.loads(route.calls[1].request.content)["messages"][1]["content"]
         assert "token repeat limit reached" in retry_prompt
         assert circuit_breaker.state == "closed"
+
+
+class TestMetricsAndWarmUp:
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_llm_metrics_are_exported(self, mock_llm, mock_fetch, client):
+        async def _side_effect(*args):
+            return PATCH_REPLY
+
+        mock_llm.side_effect = _side_effect
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
+        client.post("/edits", json={"text": "set ledger memory to 1024mb"})
+
+        metrics = client.get("/metrics").text
+        assert 'app_routing_total{method="regex"}' in metrics
+        assert 'patch_cache_lookups_total{result="miss"}' in metrics
+        assert "edit_attempts_count" in metrics
+        for name in ("llm_calls_total", "llm_tokens_total", "edit_rejections_total"):
+            assert f"# TYPE {name}" in metrics
+
+    @respx.mock
+    def test_warm_up_loads_the_model_with_the_shared_num_ctx(self):
+        route = respx.post(f"{config.ollama_url}/api/generate").mock(return_value=httpx.Response(200, json={}))
+        with TestClient(app):  # runs the lifespan
+            pass
+        sent = json.loads(route.calls[0].request.content)
+        assert sent["options"]["num_ctx"] == config.num_ctx
+        assert sent["keep_alive"] == config.keep_alive
