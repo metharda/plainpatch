@@ -148,3 +148,32 @@ class TestHistory:
 
     def test_undo_unknown_app_returns_404(self, client, temp_values_dir):
         assert client.post("/unknown/undo").status_code == 404
+
+
+class TestWriteSafety:
+    def body(self, memory, **extra):
+        return {"values": {"name": "test", "memory": memory}, "author": "me", **extra}
+
+    def test_stale_write_is_rejected(self, client, temp_values_dir):
+        from app import config_hash
+
+        base = client.get("/test").json()
+        assert client.put("/test", json=self.body(2048, expected_hash=config_hash(base))).status_code == 200
+        # a second writer that also read `base` must not overwrite the first one's change
+        resp = client.put("/test", json=self.body(4096, expected_hash=config_hash(base)))
+        assert resp.status_code == 409
+        assert client.get("/test").json()["memory"] == 2048
+
+    def test_nan_is_refused_and_not_written(self, client, temp_values_dir):
+        resp = client.put("/test", content='{"values": {"name": "test", "memory": NaN}}',
+                          headers={"Content-Type": "application/json"})
+        assert resp.status_code == 422
+        assert client.get("/test/history").json() == []
+        assert client.get("/test").json()["memory"] == 1024
+
+    def test_overlong_app_name_is_404(self, client, temp_values_dir):
+        assert client.get("/" + "a" * 300).status_code == 404
+
+    def test_blank_author_becomes_anonymous(self, client, temp_values_dir):
+        client.put("/test", json={"values": {"name": "test", "memory": 2048}, "author": "   "})
+        assert client.get("/test/history").json()[0]["author"] == "anonymous"

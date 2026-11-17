@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +12,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from pythonjsonlogger.json import JsonFormatter
 
 
@@ -40,8 +41,8 @@ async def health():
 
 
 def values_path(app_name: str) -> Path:
-    if not app_name or not app_name.isalnum():
-        raise HTTPException(404, f"Invalid application name: {app_name}")
+    if not app_name or not app_name.isalnum() or len(app_name) > 64:
+        raise HTTPException(404, f"Invalid application name: {app_name[:64]}")
 
     values_file = values_dir / f"{app_name}.value.json"
 
@@ -128,8 +129,19 @@ def save(app_name: str, after: dict, author: str, message: str, reverts: int | N
 
 class ValuesUpdate(BaseModel):
     values: dict
-    author: str = "anonymous"
-    message: str = ""
+    author: str = Field("anonymous", max_length=100)
+    message: str = Field("", max_length=2000)
+    # sha256 of the config the writer based its change on; a mismatch means someone else wrote first
+    expected_hash: str | None = None
+
+    @field_validator("author")
+    @classmethod
+    def default_blank_author(cls, author: str) -> str:
+        return author.strip() or "anonymous"
+
+
+def config_hash(values: dict) -> str:
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
 @app.get("/{app_name}")
@@ -139,6 +151,13 @@ async def get_values(app_name: str):
 
 @app.put("/{app_name}")
 async def put_values(app_name: str, update: ValuesUpdate):
+    try:
+        json.dumps(update.values, allow_nan=False)
+    except ValueError as exc:  # NaN/Infinity would be written, then break every later read
+        raise HTTPException(422, "values must be plain JSON (no NaN or Infinity)") from exc
+    # no await between this check and the write in save(), so nothing can interleave
+    if update.expected_hash is not None and update.expected_hash != config_hash(read_values(app_name)):
+        raise HTTPException(409, "The config changed since it was read (concurrent edit); retry the request")
     return save(app_name, update.values, update.author, update.message)
 
 
