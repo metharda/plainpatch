@@ -86,3 +86,32 @@ def test_non_json_response_exits_cleanly(monkeypatch):
     monkeypatch.setattr(configbot.urllib.request, "urlopen", lambda req, timeout: FakeResponse(b"<html>"))
     with pytest.raises(SystemExit, match="bad response"):
         configbot.call("GET", "/history/storefront")
+
+
+@pytest.mark.parametrize("argv, expected", [
+    (["--limit", "3", "history", "storefront"], 2),
+    (["--author", "a", "--limit", "3", "history", "storefront"], 4),
+])
+def test_find_command_skips_option_values(argv, expected):
+    assert find_command(argv) == expected
+
+
+@pytest.mark.parametrize("bad", ["0", "501", "-1"])
+def test_limit_out_of_range_is_refused_locally(bad, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["history", "storefront", "--limit", bad])
+    assert exit_info.value.code == 2
+
+
+@pytest.mark.parametrize("body", [{}, [], {"detail": "weird"}, None])
+def test_unexpected_200_body_exits_cleanly(body):
+    with patch("configbot.call", return_value=body), pytest.raises(SystemExit, match="bad response"):
+        main(["set storefront memory to 1gb"])
+
+
+@patch("configbot.call", return_value={"app": "storefront", "applied": False, "revision": None,
+                                       "changes": [], "unchanged": ["/mem/limitMiB"]})
+def test_unchanged_fields_are_shown(mock_call, capsys):
+    main(["set storefront memory to 2gb"])
+    out = capsys.readouterr().out
+    assert "/mem/limitMiB (already set)" in out and "(no changes)" in out

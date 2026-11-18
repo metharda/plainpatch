@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-BOT_URL = os.getenv("CONFIGBOT_URL", "http://localhost:7000")
+BOT_URL = os.getenv("CONFIGBOT_URL", "http://localhost:7000").rstrip("/")
 SYMBOLS = {"add": ("+", "32"), "remove": ("-", "31"), "replace": ("~", "33")}
 COMMANDS = ("history", "undo")
 
@@ -76,6 +76,8 @@ def render_change(change: dict) -> str:
 def cmd_message(args):
     result = call("POST", "/edits", {"text": args.request, "apply": args.apply, "author": args.author})
     print(color(f"app: {result['app']}", "1"))
+    for path in result.get("unchanged", []):
+        print(color(f"  = {path} (already set)", "2"))
     if not result["changes"]:
         print("  (no changes)")
     for change in result["changes"]:
@@ -103,11 +105,18 @@ def cmd_undo(args):
         print(render_change(op))
 
 
+def limit(text: str) -> int:
+    value = int(text)
+    if not 1 <= value <= 500:
+        raise argparse.ArgumentTypeError("must be between 1 and 500")
+    return value
+
+
 def find_command(argv: list[str]) -> int | None:
-    """Index of the history/undo subcommand: the first positional argument, skipping --author's value."""
+    """Index of the history/undo subcommand: the first positional argument, skipping option values."""
     i = 0
     while i < len(argv):
-        if argv[i] == "--author":
+        if argv[i] in ("--author", "--limit"):
             i += 2
         elif argv[i].startswith("-"):
             i += 1
@@ -130,13 +139,18 @@ def main(argv: list[str] | None = None):
     if command:
         parser.add_argument("app")
         if command == "history":
-            parser.add_argument("--limit", type=int, default=20)
+            parser.add_argument("--limit", type=limit, default=20, help="1-500 (default 20)")
     else:
         parser.add_argument("request", help='e.g. "set storefront memory to 1gb"')
         parser.add_argument("--apply", action="store_true", help="save the change instead of previewing it")
 
     args = parser.parse_args(argv)
-    {"history": cmd_history, "undo": cmd_undo, None: cmd_message}[command](args)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")  # e.g. the arrow on an ASCII-only terminal
+    try:
+        {"history": cmd_history, "undo": cmd_undo, None: cmd_message}[command](args)
+    except (KeyError, TypeError, AttributeError) as e:  # a 200 whose body isn't what we expect
+        sys.exit(f"bad response from {BOT_URL}: unexpected shape ({type(e).__name__}: {e})")
 
 
 if __name__ == "__main__":
