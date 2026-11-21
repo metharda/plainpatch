@@ -1,7 +1,7 @@
 """End-to-end eval: real Ollama, real services, exact-config scoring.
 
     python evals/run.py                      # all sets, needs Ollama on localhost:11434 with the model pulled
-    python evals/run.py --set tuned --label my-change --ollama http://gpu-box:11434
+    python evals/run.py --set heldout2 --label my-change --ollama http://gpu-box:11434
 
 Starts schema/values/bot-server from this repo on spare ports (values on a temp copy, preview only),
 puts a recording proxy between the bot and Ollama, runs the labeled requests in evals/cases.py, and

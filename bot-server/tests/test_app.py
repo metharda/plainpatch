@@ -16,9 +16,12 @@ from app import (
     APP_FORMAT,
     PATCH_CACHE,
     CircuitBreaker,
+    EditRequest,
     app,
+    cache_key,
     circuit_breaker,
     config,
+    config_hash,
     describe,
     exponential_backoff,
     route_app,
@@ -262,7 +265,7 @@ class TestProcessMessageWithMock:
 
     @patch("app.fetch_json")
     @patch("app.call_llm")
-    def test_all_retries_fail_returns_500(self, mock_llm, mock_fetch, client):
+    def test_all_retries_fail_returns_422_with_reason(self, mock_llm, mock_fetch, client):
         # Arrange: LLM always returns invalid JSON
         mock_llm.side_effect = self._mock_call_llm([
             "not json", "not json", "not json",
@@ -273,7 +276,8 @@ class TestProcessMessageWithMock:
         resp = client.post("/edits", json={"text": "set ledger memory to 1024mb"})
 
         # Assert
-        assert resp.status_code == 500
+        assert resp.status_code == 422
+        assert "invalid JSON" in resp.json()["detail"]
 
 
 class TestPromptInjection:
@@ -350,7 +354,9 @@ class TestJsonPatchEdits:
         assert data["revision"] == 7
         url, method, payload = mock_fetch.call_args.args
         assert url.endswith("/ledger") and method == "PUT"
-        assert payload == {"values": SAMPLE_MODIFIED_VALUES, "author": "arda", "message": "set ledger memory to 1024mb"}
+        assert payload["values"] == SAMPLE_MODIFIED_VALUES
+        assert (payload["author"], payload["message"]) == ("arda", "set ledger memory to 1024mb")
+        assert payload["expected_hash"] == config_hash(SAMPLE_VALUES)  # values service rejects stale writes
 
     @patch("app.fetch_json")
     @patch("app.call_llm")
@@ -519,7 +525,14 @@ class TestRoutingAndCache:
     @pytest.mark.parametrize("text, expected", [
         ("set ledger memory to 1gb", "ledger"),
         ("Scale STOREFRONT to 3 replicas", "storefront"),
-        ("set TENANT to storefront-lobby for orders", None),  # two app names: let the LLM decide
+        ("set TENANT to storefront-lobby for orders", "orders"),  # "storefront-lobby" is a value, not a target
+        ("set image to storefront:2.0", None),  # app name only inside a value: let the LLM decide (or refuse)
+        ("set TENANT to storefront", None),
+        ("set image to storefront:2.0 on ledger", "ledger"),
+        ("set ledger hostname to storefront.example.com", "ledger"),
+        ("storefront: set memory to 3gb", "storefront"),  # a label, not an image tag
+        ("scale storefront.", "storefront"),
+        ("set storefront and ledger memory to 1gb", None),  # two targets
         ("set the statefulset memory to 1gb", None),
         ("restorefront the ordersservice", None),  # substrings don't count
     ])
@@ -551,7 +564,7 @@ class TestRoutingAndCache:
         mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES] * 2
 
         first = client.post("/edits", json={"text": "set ledger memory to 1024mb"}).json()
-        second = client.post("/edits", json={"text": "  Set Ledger memory   to 1024MB "}).json()
+        second = client.post("/edits", json={"text": "  set ledger   memory to 1024mb "}).json()
 
         assert second == first
         assert mock_llm.call_count == 1
@@ -622,3 +635,70 @@ class TestMetricsAndWarmUp:
         sent = json.loads(route.calls[0].request.content)
         assert sent["options"]["num_ctx"] == config.num_ctx
         assert sent["keep_alive"] == config.keep_alive
+
+
+class TestHardening:
+    def test_cache_is_case_sensitive(self):
+        assert cache_key("set storefront image to Storefront:1.0", "storefront", {}, {}) != cache_key("set storefront image to storefront:1.0", "storefront", {}, {})
+
+    @pytest.mark.parametrize("body", [
+        '{"text": NaN}', '{"text": "x", "author": Infinity}', '{"text": "x", "apply": "yes"}',
+        '{"text": "' + "a" * 2001 + '"}',
+    ])
+    def test_bad_bodies_get_a_short_422(self, client, body):
+        resp = client.post("/edits", content=body, headers={"Content-Type": "application/json"})
+        assert resp.status_code == 422
+        assert isinstance(resp.json()["detail"], str) and len(resp.content) < 700
+
+    def test_lone_surrogate_is_a_400(self, client):
+        resp = client.post("/edits", content='{"text": "\\ud800 storefront"}', headers={"Content-Type": "application/json"})
+        assert resp.status_code in (400, 422)  # a clean client error, not a 500
+
+    def test_head_health_and_degraded_state(self, client):
+        assert client.head("/health").status_code == 200
+        circuit_breaker.state = "open"
+        assert client.get("/health").json()["status"] == "degraded"
+
+    def test_half_open_lets_one_probe_through(self):
+        cb = CircuitBreaker(failure_threshold=1, reset_timeout=0.05)
+        cb.record_failure()
+        time.sleep(0.1)
+        assert cb.can_execute() is True  # the probe
+        assert cb.can_execute() is False  # everyone else waits for its result
+
+    @patch("app.call_llm")
+    def test_multi_app_request_gets_a_clear_refusal(self, mock_llm, client):
+        async def _side_effect(*args):
+            return json.dumps({"app": "none"})
+
+        mock_llm.side_effect = _side_effect
+        resp = client.post("/edits", json={"text": "set storefront and ledger memory to 1gb"})
+        assert resp.status_code == 400
+        assert "one app per request" in resp.json()["detail"]
+
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_no_op_request_is_a_200_with_unchanged(self, mock_llm, mock_fetch, client):
+        async def _side_effect(*args):
+            return json.dumps({"operations": [{"op": "replace", "path": MEMORY_PATH, "value": "2048mb"}]})
+
+        mock_llm.side_effect = _side_effect
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES]
+        resp = client.post("/edits", json={"text": "set ledger memory to 2048mb", "apply": True})
+        assert resp.status_code == 200
+        assert resp.json()["changes"] == [] and resp.json()["unchanged"] == [MEMORY_PATH]
+        assert resp.json()["applied"] is False and mock_fetch.call_count == 2  # nothing written
+
+    @patch("app.fetch_json")
+    @patch("app.call_llm")
+    def test_noop_save_is_not_reported_as_applied(self, mock_llm, mock_fetch, client):
+        async def _side_effect(*args):
+            return PATCH_REPLY
+
+        mock_llm.side_effect = _side_effect
+        mock_fetch.side_effect = [SAMPLE_SCHEMA, SAMPLE_VALUES, {"id": None, "patch": []}]
+        data = client.post("/edits", json={"text": "set ledger memory to 1024mb", "apply": True}).json()
+        assert data["applied"] is False and data["revision"] is None
+
+    def test_author_is_normalized(self):
+        assert EditRequest(text="x", author="   ").author == "anonymous"

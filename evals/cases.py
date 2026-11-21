@@ -4,9 +4,12 @@ C = M = T = "/workload/container"  # every app uses the same layout
 REMOVE = object()
 
 # (request, expected app or None when the request must be refused, {pointer: expected new value | REMOVE})
+# Labels follow Kubernetes' limit >= request rule: when a lowered limit crosses the current request,
+# the request is clamped to it (5 labels were updated when that rule was added).
 # The design was iterated on TUNED; HELDOUT and HELDOUT2 were written later to check that it generalizes.
 TUNED = [
-    ("set ledger service memory to 1024mb", "ledger", {f"{T}/resources/memory/limitMiB": 1024}),
+    ("set ledger service memory to 1024mb", "ledger",
+     {f"{T}/resources/memory/limitMiB": 1024, f"{T}/resources/memory/requestMiB": 1024}),
     ("set TENANT env to globex for orders service", "orders", {f"{M}/envs/TENANT": "globex"}),
     ("lower cpu limit of storefront service to 80%", "storefront", {f"{C}/resources/cpu/limitMilliCPU": 1200}),
     ("set storefront memory limit to 4gb", "storefront", {f"{C}/resources/memory/limitMiB": 4096}),
@@ -27,7 +30,8 @@ TUNED = [
      {"/ingress/proxy/timeouts/readSeconds": 120}),
     ("set max connections of storefront to 50", "storefront", {"/workload/maxConnections": 50}),
     ("double the memory limit of orders", "orders", {f"{M}/resources/memory/limitMiB": 2048}),
-    ("halve the ledger cpu limit", "ledger", {f"{T}/resources/cpu/limitMilliCPU": 1250}),
+    ("halve the ledger cpu limit", "ledger",
+     {f"{T}/resources/cpu/limitMilliCPU": 1250, f"{T}/resources/cpu/requestMilliCPU": 1250}),
     ("set imagePullPolicy to Always for ledger", "ledger", {f"{T}/imagePullPolicy": "Always"}),
     ("raise storefront memory limit by 512mb", "storefront", {f"{C}/resources/memory/limitMiB": 2560}),
     ("set ledger memory limit and request to 8gb", "ledger",
@@ -68,7 +72,8 @@ HELDOUT = [
 # written before the quantity-string design existed and not looked at until it was finished
 HELDOUT2 = [
     ("storefront needs 3gb of memory", "storefront", {f"{C}/resources/memory/limitMiB": 3072}),
-    ("cut the ledger memory limit by 1gb", "ledger", {f"{T}/resources/memory/limitMiB": 3072}),
+    ("cut the ledger memory limit by 1gb", "ledger",
+     {f"{T}/resources/memory/limitMiB": 3072, f"{T}/resources/memory/requestMiB": 3072}),
     ("increase storefront cpu limit by 25%", "storefront", {f"{C}/resources/cpu/limitMilliCPU": 1875}),
     ("set orders cpu limit to one and a half cores", "orders", {f"{M}/resources/cpu/limitMilliCPU": 1500}),
     ("set storefront memory request to 0.5gb", "storefront", {f"{C}/resources/memory/requestMiB": 512}),
@@ -91,8 +96,10 @@ HELDOUT2 = [
     ("set storefront maxConnections to 100 and replicas to 3", "storefront",
      {"/workload/maxConnections": 100, "/workload/replicas": 3}),
     ("what's the weather in Paris", None, {}),
-    ("set ledger memory to 2048", "ledger", {f"{T}/resources/memory/limitMiB": 2048}),
-    ("set storefront cpu limit to 750m", "storefront", {f"{C}/resources/cpu/limitMilliCPU": 750}),
+    ("set ledger memory to 2048", "ledger",
+     {f"{T}/resources/memory/limitMiB": 2048, f"{T}/resources/memory/requestMiB": 2048}),
+    ("set storefront cpu limit to 750m", "storefront",
+     {f"{C}/resources/cpu/limitMilliCPU": 750, f"{C}/resources/cpu/requestMilliCPU": 750}),
 ]
 
 SETS = {"tuned": TUNED, "heldout": HELDOUT, "heldout2": HELDOUT2}

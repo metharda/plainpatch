@@ -17,14 +17,15 @@ import jsonpatch
 import jsonpointer
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from jsonschema import ValidationError, validate
 from prometheus_client import Counter, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictBool, field_validator
 from pythonjsonlogger.json import JsonFormatter
 
-from intents import IntentError, compile_intents, intent_format
+from intents import IntentError, check_limits, compile_intents, intent_format
 from prompts import (
     APPS,
     EXTRACT_APP_SYSTEM,
@@ -73,13 +74,13 @@ class CircuitBreaker:
     def can_execute(self) -> bool:
         if self.state == "closed":
             return True
-        if self.state == "open":
-            if time.time() - self.last_failure > self.reset_timeout:
-                self.state = "half-open"
-                log.info("Circuit breaker half-open, testing...")
-                return True
-            return False
-        return True
+        # open, or half-open with a probe in flight: let one caller through per reset_timeout
+        if time.time() - self.last_failure > self.reset_timeout:
+            self.state = "half-open"
+            self.last_failure = time.time()
+            log.info("Circuit breaker half-open, testing...")
+            return True
+        return False
 
 
 @dataclass
@@ -102,9 +103,14 @@ circuit_breaker = CircuitBreaker()
 
 
 class EditRequest(BaseModel):
-    text: str
-    apply: bool = False
-    author: str = "anonymous"
+    text: str = Field(max_length=2000)
+    apply: StrictBool = False  # "yes" or 1 must not be able to persist a change
+    author: str = Field("anonymous", max_length=100)
+
+    @field_validator("author")
+    @classmethod
+    def default_blank_author(cls, author: str) -> str:
+        return author.strip() or "anonymous"
 
 
 async def warm_up():
@@ -275,9 +281,27 @@ def describe(patch: list[dict], values: dict) -> list[dict]:
     ]
 
 
+SETTING_VERBS = re.compile(r"^\s*(set|change|update|rename|switch|make)\b", re.IGNORECASE)
+
+
+def app_mentions(text: str) -> set[str]:
+    """App names used as targets. Names in value positions ("=storefront", "storefront:2.0", "storefront.example.com",
+    "storefront-lobby", and "set TENANT to storefront") are skipped: they're what a field is set to, not which
+    app. "add env X to storefront" still targets storefront: only setting verbs make "to <app>" a value."""
+    to_is_value = bool(SETTING_VERBS.search(text))
+    found = set()
+    for a in APPS:
+        # a value position is glued to a word: "storefront:2.0", "storefront.example.com", "storefront-lobby", "=storefront";
+        # "storefront: set memory..." or "...scale storefront." are still targets
+        for m in re.finditer(rf"(?<![=:/.\w-])\b{a}\b(?![:./=-]\w)(?!\w)", text, re.IGNORECASE):
+            if not (to_is_value and re.search(r"\bto\s+$", text[:m.start()], re.IGNORECASE)):
+                found.add(a)
+    return found
+
+
 def route_app(text: str) -> str | None:
-    """Pick the app without the LLM when exactly one app name appears as a word."""
-    found = {a for a in APPS if re.search(rf"\b{a}\b", text, re.IGNORECASE)}
+    """Pick the app without the LLM when exactly one app is named as the target."""
+    found = app_mentions(text)
     return found.pop() if len(found) == 1 else None
 
 
@@ -288,22 +312,26 @@ PATCH_CACHE_SIZE = 256
 
 
 def cache_key(user_input: str, app_name: str, values: dict, schema: dict) -> str:
-    normalized = " ".join(user_input.lower().split())
+    normalized = " ".join(user_input.split())  # case matters: "Storefront:1.0" and "storefront:1.0" are different values
     # hashing schema too means a cached patch is always valid again (same input, same validation)
     digest = hashlib.sha256(json.dumps([values, schema], sort_keys=True).encode()).hexdigest()
     return f"{app_name}|{digest}|{normalized}"
 
 
+def config_hash(values: dict) -> str:
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
+
+
 def require_known_app(app_name: str):
     if app_name not in APPS:
-        raise HTTPException(404, f"Unknown app: {app_name}. Available: {', '.join(APPS)}")
+        raise HTTPException(404, f"Unknown app: {app_name[:50]}. Available: {', '.join(APPS)}")
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {
-        "status": "healthy",
-        "circuit_breaker": circuit_breaker.state
+        "status": "healthy" if circuit_breaker.state == "closed" else "degraded",
+        "circuit_breaker": circuit_breaker.state,
     }
 
 
@@ -312,6 +340,10 @@ async def process_message(req: EditRequest):
     user_input = req.text.strip()
     if not user_input:
         raise HTTPException(400, "Input cannot be empty")
+    try:
+        user_input.encode("utf-8")
+    except UnicodeEncodeError as exc:  # e.g. a lone surrogate from "\ud800"
+        raise HTTPException(400, "Input contains invalid characters") from exc
 
     request_id = f"{int(time.time() * 1000)}"
     log.info("Processing request", extra={"request_id": request_id, "text": user_input[:100]})
@@ -328,7 +360,10 @@ async def process_message(req: EditRequest):
             app_name = None
 
     if app_name not in APPS:
-        raise HTTPException(400, f"Could not identify app. Available: {', '.join(APPS)}")
+        named = app_mentions(user_input)
+        if len(named) > 1:
+            raise HTTPException(400, f"The request names several apps ({', '.join(sorted(named))}); edit one app per request")
+        raise HTTPException(400, f"Could not identify app. Name one of: {', '.join(APPS)}")
 
     log.info("App identified", extra={"request_id": request_id, "app": app_name})
 
@@ -337,7 +372,7 @@ async def process_message(req: EditRequest):
     values = await fetch_json(f"{config.values_url}/{app_name}")
 
     # Stage 2: Modify configuration
-    # The schema isn't sent: the path enum in patch_format() plus local validation do its job,
+    # The schema isn't sent: the path enums in intent_format() plus local validation do its job,
     # which cuts the prompt from ~5k to ~1k tokens (benchmarked: same or better accuracy).
     prompt = MODIFY_CONFIG_USER.format(input=user_input, values=json.dumps(values, separators=(",", ":")))
     key = cache_key(user_input, app_name, values, schema)
@@ -347,17 +382,18 @@ async def process_message(req: EditRequest):
             if key in PATCH_CACHE:
                 PATCH_CACHE.move_to_end(key)
                 PATCH_CACHE_LOOKUPS.labels("hit").inc()
-                intents, patch = PATCH_CACHE[key]
+                intents, patch, unchanged = PATCH_CACHE[key]
             else:
                 PATCH_CACHE_LOOKUPS.labels("miss").inc()
                 response = await call_llm(MODIFY_CONFIG_SYSTEM, prompt + feedback, intent_format(values), 256)
                 parsed = json.loads(response, parse_constant=reject_constant)
                 intents = parsed.get("operations") if isinstance(parsed, dict) else None
                 # the model said *what* to change; units, percentages and pointers are resolved in code
-                patch = compile_intents(intents, values)
+                patch, unchanged = compile_intents(intents, values, request=user_input)
             result = jsonpatch.apply_patch(values, patch)
             validate(instance=result, schema=schema)
-            PATCH_CACHE[key] = (intents, patch)
+            check_limits(result)
+            PATCH_CACHE[key] = (intents, patch, unchanged)
             if len(PATCH_CACHE) > PATCH_CACHE_SIZE:
                 PATCH_CACHE.popitem(last=False)
             EDIT_ATTEMPTS.observe(attempt + 1)
@@ -377,25 +413,28 @@ async def process_message(req: EditRequest):
         # temperature is 0, so retrying the same prompt would reproduce the same mistake
         feedback = RETRY_FEEDBACK.format(error=error[:500])
     else:
-        raise HTTPException(500, "Failed to generate valid configuration")
+        # 422: the request couldn't be turned into a valid change; say why instead of a bare 500
+        raise HTTPException(422, f"Could not produce a valid change after {config.max_retries} attempts: {error[:300]}")
 
     response = {
         "app": app_name,
         "applied": False,
         "revision": None,
         "changes": describe(patch, values),
+        "unchanged": unchanged,  # fields the request names that already have the requested value
         "intent": intents,  # what the model asked for, before code resolved units and arithmetic
         "patch": patch,
         "config": result,
     }
 
     if req.apply and patch:
-        # ponytail: last write wins if two requests edit the same app at once; add an If-Match revision check if that matters
+        # optimistic concurrency: the values service refuses (409) if the config changed since we read it,
+        # so two concurrent "increase memory by 512mb" requests can't silently overwrite each other
         entry = await fetch_json(
             f"{config.values_url}/{app_name}", "PUT",
-            {"values": result, "author": req.author, "message": user_input},
+            {"values": result, "author": req.author, "message": user_input, "expected_hash": config_hash(values)},
         )
-        response.update(applied=True, revision=entry["id"])
+        response.update(applied=entry["id"] is not None, revision=entry["id"])
 
     log.info("Request successful", extra={"request_id": request_id, "app": app_name, "applied": response["applied"]})
     return response
@@ -411,6 +450,13 @@ async def history(app_name: str, limit: int = Query(20, ge=1, le=500)):
 async def undo(app_name: str, author: str = "anonymous"):
     require_known_app(app_name)
     return await fetch_json(f"{config.values_url}/{app_name}/undo?{urlencode({'author': author})}", "POST")
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_validation_error(request: Request, exc: RequestValidationError):
+    problems = "; ".join(f"{'.'.join(str(p) for p in e['loc'] if p != 'body') or 'body'}: {e['msg']}"
+                         for e in exc.errors())
+    return JSONResponse(status_code=422, content={"detail": problems[:500]})
 
 
 @app.exception_handler(Exception)
