@@ -497,7 +497,7 @@ echo -e "    • Monitoring (Prometheus + Grafana dashboard)"
 echo -e "    • API Gateway (Nginx + rate limiting + security headers)"
 echo -e "    • CI/CD (GitHub Actions: lint → test → build → security)"
 echo -e "    • Docker best practices (multi-stage, non-root, healthcheck)"
-echo -e "    • 101 unit tests + integration tests"
+echo -e "    • 213 unit tests + real-LLM evals + integration tests"
 echo -e "    • Pre-commit hooks + Ruff linting"
 echo ""
 
