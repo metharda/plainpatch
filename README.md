@@ -10,7 +10,7 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-<img src="docs/demo/hero.gif" width="800" alt="Terminal recording: 'configbot \"lower the orders cpu limit to 80%\"' prints a preview, '~ /workload/container/resources/cpu/limitMilliCPU: 500 → 400'. The same command with --apply saves it as revision #1. 'configbot history orders' lists the change with author and time, 'configbot undo orders' reverts it as revision #2 back to 500, and 'configbot \"make orders faster\"' is refused with a 422 explaining that the value doesn't follow from the request.">
+<img src="docs/demo/hero.gif" width="800" alt="Terminal recording: configbot previews 'lower the orders cpu limit to 80%' as '~ /workload/container/resources/cpu/limitMilliCPU: 500 → 400'. The same request with --apply saves it as revision #1. 'configbot history orders' lists the change with author and time, 'configbot undo orders' reverts it as revision #2 back to 500, and 'make orders faster' is refused with a 422 explaining that the value doesn't follow from the request.">
 <br>
 <sub>Real time against qwen2.5:3b on an RTX 4070. Nothing is cut or mocked.</sub>
 
