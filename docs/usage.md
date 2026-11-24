@@ -25,8 +25,8 @@ curl -s localhost:7000/health
 ### 2. Preview a change
 
 ```bash
-alias configbot="python3 $(pwd)/cli/configbot.py"
-configbot "lower the orders cpu limit to 80%"
+alias ppatch="python3 $(pwd)/cli/ppatch.py"
+ppatch "lower the orders cpu limit to 80%"
 ```
 
 ```
@@ -40,7 +40,7 @@ Nothing is saved yet. The model returned `"80%"` and code computed 80% of 500.
 ### 3. Apply it
 
 ```bash
-configbot "lower the orders cpu limit to 80%" --apply
+ppatch "lower the orders cpu limit to 80%" --apply
 ```
 
 The output is the same diff, followed by `saved as revision #1`.
@@ -48,7 +48,7 @@ The output is the same diff, followed by `saved as revision #1`.
 ### 4. Read the audit log
 
 ```bash
-configbot history orders
+ppatch history orders
 ```
 
 ```
@@ -59,7 +59,7 @@ configbot history orders
 ### 5. Undo it
 
 ```bash
-configbot undo orders
+ppatch undo orders
 ```
 
 ```
@@ -70,31 +70,32 @@ reverted #1 as revision #2
 ### 6. Try something the system should refuse
 
 ```bash
-configbot "make orders faster"
+ppatch "make orders faster"
 ```
 
 The command exits with code 1 and a one-line reason. The request names no field and no value, so there's nothing grounded to change. That refusal is deliberate: see [why values must come from the request](intents.md#grounding).
 
 ## CLI reference
 
-`cli/configbot.py` is a single file that uses only the Python standard library.
+`cli/ppatch.py` is a single file that uses only the Python standard library. Use it as an alias, or link it onto your `PATH`:
 
 ```bash
-alias configbot="python3 $(pwd)/cli/configbot.py"
+alias ppatch="python3 $(pwd)/cli/ppatch.py"          # this shell
+ln -s "$(pwd)/cli/ppatch.py" ~/.local/bin/ppatch     # every shell (it has a shebang)
 ```
 
 | Command | Effect |
 |---|---|
-| `configbot "<request>"` | Preview: print the diff, save nothing. |
-| `configbot "<request>" --apply` | Save the change and print its revision. |
-| `configbot history APP [--limit N]` | Audit log, newest first. `N` is 1–500, default 20. |
-| `configbot undo APP` | Revert the latest change. |
+| `ppatch "<request>"` | Preview: print the diff, save nothing. |
+| `ppatch "<request>" --apply` | Save the change and print its revision. |
+| `ppatch history APP [--limit N]` | Audit log, newest first. `N` is 1–500, default 20. |
+| `ppatch undo APP` | Revert the latest change. |
 
 `--author NAME` works with every command and may come before or after it. The default is your OS user name, or `anonymous` if there isn't one.
 
 **Output.** `~` marks a replaced value (`old → new`), `+` an added one, `-` a removed one, and `= path (already set)` a field that already had the requested value. Colors appear only on a TTY.
 
-**Environment.** `CONFIGBOT_URL` sets the assistant's base URL (default `http://localhost:7000`). A trailing slash is fine.
+**Environment.** `PPATCH_URL` sets the assistant's base URL (default `http://localhost:7000`). A trailing slash is fine.
 
 **Exit codes**
 

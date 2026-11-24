@@ -10,7 +10,7 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-<img src="docs/demo/hero.gif" width="800" alt="Terminal recording: configbot previews 'lower the orders cpu limit to 80%' as '~ /workload/container/resources/cpu/limitMilliCPU: 500 → 400'. The same request with --apply saves it as revision #1. 'configbot history orders' lists the change with author and time, 'configbot undo orders' reverts it as revision #2 back to 500, and 'make orders faster' is refused with a 422 explaining that the value doesn't follow from the request.">
+<img src="docs/demo/hero.gif" width="800" alt="Terminal recording: ppatch previews 'lower the orders cpu limit to 80%' as '~ /workload/container/resources/cpu/limitMilliCPU: 500 → 400'. The same request with --apply saves it as revision #1. 'ppatch history orders' lists the change with author and time, 'ppatch undo orders' reverts it as revision #2 back to 500, and the vague request 'make orders faster' is refused with a 422 that gives the reason.">
 <br>
 <sub>Real time against qwen2.5:3b on an RTX 4070. Nothing is cut or mocked.</sub>
 
@@ -39,10 +39,10 @@ curl -s localhost:7000/health           # {"status":"healthy","circuit_breaker":
 Then try a change:
 
 ```bash
-alias configbot="python3 $(pwd)/cli/configbot.py"
-configbot "lower the orders cpu limit to 80%"            # preview: 500 → 400
-configbot "lower the orders cpu limit to 80%" --apply    # saved as revision #1
-configbot undo orders                                    # back to 500
+alias ppatch="python3 $(pwd)/cli/ppatch.py"
+ppatch "lower the orders cpu limit to 80%"            # preview: 500 → 400
+ppatch "lower the orders cpu limit to 80%" --apply    # saved as revision #1
+ppatch undo orders                                    # back to 500
 ```
 
 > [!TIP]
@@ -86,11 +86,11 @@ These are qwen2.5:3b numbers on an RTX 4070, scored on exact configs with no LLM
 
 | Task | Command |
 | :--- | :------ |
-| Preview a change | `configbot "set ledger replicas to 3"` |
-| Apply it | `configbot "set ledger replicas to 3" --apply --author you` |
-| See what changed | `configbot history ledger` |
-| Undo the last change | `configbot undo ledger` |
-| Add an env var | `configbot "add env LOG_LEVEL=debug to storefront"` |
+| Preview a change | `ppatch "set ledger replicas to 3"` |
+| Apply it | `ppatch "set ledger replicas to 3" --apply --author you` |
+| See what changed | `ppatch history ledger` |
+| Undo the last change | `ppatch undo ledger` |
+| Add an env var | `ppatch "add env LOG_LEVEL=debug to storefront"` |
 | Watch the LLM metrics | `docker compose --profile monitoring up -d` → Grafana on `:3000` |
 | Put nginx in front | `docker compose --profile gateway up -d` (rate limited, `/values/` read-only) |
 | Run the tests / the evals | `make test` · `make eval` |

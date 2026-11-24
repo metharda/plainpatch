@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Terminal client for the bot service. Standard library only.
+"""ppatch: plainpatch's terminal client. Standard library only.
 
-    configbot "set storefront memory to 1gb"            preview the change as a diff
-    configbot "set storefront memory to 1gb" --apply    preview and save it
-    configbot history storefront                        list saved changes
-    configbot undo storefront                           roll back the latest change
+    ppatch "set storefront memory to 1gb"           preview the change as a diff
+    ppatch "set storefront memory to 1gb" --apply   preview and save it
+    ppatch history storefront                       list saved changes
+    ppatch undo storefront                          roll back the latest change
 """
 import argparse
 import getpass
@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-BOT_URL = os.getenv("CONFIGBOT_URL", "http://localhost:7000").rstrip("/")
+BOT_URL = os.getenv("PPATCH_URL", "http://localhost:7000").rstrip("/")
 SYMBOLS = {"add": ("+", "32"), "remove": ("-", "31"), "replace": ("~", "33")}
 COMMANDS = ("history", "undo")
 
@@ -131,7 +131,7 @@ def main(argv: list[str] | None = None):
     command = argv.pop(index) if index is not None else None
 
     parser = argparse.ArgumentParser(
-        prog=f"configbot {command}" if command else "configbot",
+        prog=f"ppatch {command}" if command else "ppatch",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

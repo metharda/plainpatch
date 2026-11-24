@@ -40,7 +40,7 @@ A request goes through these stages:
 | `bot-server/prompts.py` | The two system prompts, the retry-feedback template, and the list of known apps. |
 | `values-server/app.py` | Owns config files: reads, atomic writes (temp file then rename), the append-only JSONL audit log, undo, and the `expected_hash` stale-write check. |
 | `schema-server/app.py` | Serves `data/schemas/<app>.schema.json`. Read-only. |
-| `cli/configbot.py` | Terminal client. Standard library only. |
+| `cli/ppatch.py` | Terminal client. Standard library only. |
 | `data/` | One JSON Schema and one current-values file per app. |
 | `evals/` | `cases.py`: 69 labeled requests in three sets. `run.py`: drives the real services against a real Ollama and scores exact resulting configs. |
 | `gateway-server/`, `monitoring-server/` | nginx (rate limiting, read-only `/values/`), Prometheus scrape config, Grafana dashboard. |
@@ -132,9 +132,9 @@ The op names stay JSON Patch's own (`replace`, `add`, `remove`), because custom 
 
 **Context.** A client for a self-hosted tool should run anywhere Python does, with no virtualenv or install step.
 
-**Decision.** `cli/configbot.py` uses only the standard library (`urllib`, `argparse`, `json`). It renders diffs, works without a TTY, and turns every server or transport problem into a one-line message with exit code 1.
+**Decision.** `cli/ppatch.py` uses only the standard library (`urllib`, `argparse`, `json`). It renders diffs, works without a TTY, and turns every server or transport problem into a one-line message with exit code 1.
 
 **Consequences.**
 
-- `python3 cli/configbot.py` works on a fresh machine.
+- `python3 cli/ppatch.py` works on a fresh machine.
 - No retries, streaming or auth helpers. Those would justify a dependency if they're ever needed.
