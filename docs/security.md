@@ -6,7 +6,7 @@ Please report vulnerabilities privately through GitHub's **Report a vulnerabilit
 
 ## Threat model
 
-ai-config-tool is meant to run on a trusted network, next to the configs it edits.
+plainpatch is meant to run on a trusted network, next to the configs it edits.
 
 - **Prompt injection.** User text reaches the model, so treat model output as untrusted. Nothing it emits is written without passing [`compile_intents()`](../bot-server/intents.py):
   - paths limited to existing ones

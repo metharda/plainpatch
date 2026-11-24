@@ -3,7 +3,7 @@
 
 help:
 	@echo ""
-	@echo "  AI Config Tool - Development Commands"
+	@echo "  plainpatch - Development Commands"
 	@echo "  ────────────────────────────────────────"
 	@echo ""
 	@echo "  Core:"

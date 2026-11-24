@@ -54,7 +54,7 @@ docker compose --profile monitoring up -d     # Prometheus :9090, Grafana :3000 
 docker compose --profile gateway up -d        # nginx on :80, rate limited, /values/ is read-only
 ```
 
-Grafana provisions the **AI Config Tool – Services Dashboard** automatically. The top rows show HTTP traffic for all three services. The **LLM** row shows:
+Grafana provisions the **plainpatch – Services Dashboard** automatically. The top rows show HTTP traffic for all three services. The **LLM** row shows:
 
 - LLM calls per second and p95 latency, by stage (`app`, `edit`)
 - prompt tokens versus tokens served from Ollama's prompt cache

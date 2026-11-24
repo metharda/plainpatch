@@ -1,10 +1,10 @@
 <div align="center">
 
-# ai-config-tool
+# plainpatch
 
 **Edit service configs in plain English. A local model reads the request; code does the math and checks every value.**
 
-[![Tests](https://img.shields.io/github/actions/workflow/status/metharda/ai-config-tool/ci.yml?label=tests&logo=githubactions&logoColor=white)](https://github.com/metharda/ai-config-tool/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/github/actions/workflow/status/metharda/plainpatch/ci.yml?label=tests&logo=githubactions&logoColor=white)](https://github.com/metharda/plainpatch/actions/workflows/ci.yml)
 [![Evals: 61/69](https://img.shields.io/badge/evals-61%2F69-4338CA)](docs/evals.md)
 [![Runs on Ollama](https://img.shields.io/badge/runs%20on-Ollama-000000?logo=ollama&logoColor=white)](https://ollama.com)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
@@ -16,7 +16,7 @@
 
 </div>
 
-ai-config-tool turns requests like *"lower the orders cpu limit to 80%"* into a validated [JSON Patch](https://www.rfc-editor.org/rfc/rfc6902) against a service's config. It shows you the diff, and saves it with an audit entry you can undo when you ask. It runs entirely on your machine: three small FastAPI services, a standard-library CLI, and a 3B model on [Ollama](https://ollama.com). The model only *extracts* what to change. Everything that has to be exact, from units and percentages to which fields exist and whether a value really came from your words, is done and checked by code.
+plainpatch turns requests like *"lower the orders cpu limit to 80%"* into a validated [JSON Patch](https://www.rfc-editor.org/rfc/rfc6902) against a service's config. It shows you the diff, and saves it with an audit entry you can undo when you ask. It runs entirely on your machine: three small FastAPI services, a standard-library CLI, and a 3B model on [Ollama](https://ollama.com). The model only *extracts* what to change. Everything that has to be exact, from units and percentages to which fields exist and whether a value really came from your words, is done and checked by code.
 
 - **The model can't invent fields.** Ollama's structured outputs get a grammar built from the current config, so every path is one that exists and every value has the right type.
 - **Code does the arithmetic.** The model copies `"80%"`, `"+512mb"` or `"1.5 cores"` as you wrote it, and code converts by the field's unit (`…MiB`, `…MilliCPU`, `…Seconds`).
@@ -30,7 +30,7 @@ ai-config-tool turns requests like *"lower the orders cpu limit to 80%"* into a 
 **You need:** Docker with Compose v2 and about 4 GB of free RAM. An NVIDIA GPU is optional but makes requests about 10× faster.
 
 ```bash
-git clone https://github.com/metharda/ai-config-tool.git && cd ai-config-tool
+git clone https://github.com/metharda/plainpatch.git && cd plainpatch
 cp .env.example .env
 docker compose up -d                    # first start pulls qwen2.5:3b (~2 GB)
 curl -s localhost:7000/health           # {"status":"healthy","circuit_breaker":"closed"}
@@ -116,7 +116,7 @@ These are qwen2.5:3b numbers on an RTX 4070, scored on exact configs with no LLM
 
 | Approach | Good for | Trade-off |
 | :--- | :------- | :-------- |
-| **ai-config-tool** | Plain-English edits to schema-backed configs, with preview, audit and undo, on local hardware | Needs a schema and a running model; edits existing fields only |
+| **plainpatch** | Plain-English edits to schema-backed configs, with preview, audit and undo, on local hardware | Needs a schema and a running model; edits existing fields only |
 | Editing YAML/JSON by hand, `kubectl patch` | Full control, no moving parts | You do the unit math and remember every path |
 | Asking a chat assistant to rewrite the file | Any format, no setup | Rewrites the whole file, can't be validated before you paste it, and the data leaves your machine |
 | Helm values / Kustomize overlays | Repeatable, reviewed changes in Git | Not conversational; each change is a manual edit |

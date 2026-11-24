@@ -1,7 +1,7 @@
 [project]
-name = "ai-config-tool"
+name = "plainpatch"
 version = "1.0.0"
-description = "AI-Assisted Application Configuration Tool"
+description = "Edit service configs in plain English; a local model reads the request, code checks every value"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 authors = [{ name = "Ahmet Arda ORAK" }]

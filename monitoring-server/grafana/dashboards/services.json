@@ -368,7 +368,7 @@
   ],
   "schemaVersion": 39,
   "tags": [
-    "ai-config-tool"
+    "plainpatch"
   ],
   "templating": {
     "list": []
@@ -377,6 +377,6 @@
     "from": "now-1h",
     "to": "now"
   },
-  "title": "AI Config Tool - Services Dashboard",
-  "uid": "ai-config-tool-dashboard"
+  "title": "plainpatch - Services Dashboard",
+  "uid": "plainpatch-dashboard"
 }
